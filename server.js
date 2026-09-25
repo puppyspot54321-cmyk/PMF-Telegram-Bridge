@@ -6,16 +6,13 @@ import { StringSession } from "telegram/sessions/index.js";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-/*
- * PMF MEDIA VAULT
- * This is the Telegram group that permanently holds PMF media.
- */
 const PMF_MEDIA_CHAT_ID = "4490224317";
 
 let telegramStatus = "starting";
 let telegramError = null;
 let telegramBot = null;
 let lastChat = null;
+let pmfMediaChat = null;
 
 const apiId = Number(process.env.TELEGRAM_API_ID);
 const apiHash = process.env.TELEGRAM_API_HASH;
@@ -30,10 +27,6 @@ const client = new TelegramClient(
   }
 );
 
-/*
- * Extract useful information from a Telegram message
- * without downloading the media.
- */
 function describeMedia(message) {
   if (!message?.media) {
     return null;
@@ -43,8 +36,6 @@ function describeMedia(message) {
 
   if (document) {
     let fileName = null;
-    let mimeType = document.mimeType || null;
-    let size = document.size ? String(document.size) : null;
 
     if (Array.isArray(document.attributes)) {
       for (const attribute of document.attributes) {
@@ -61,9 +52,11 @@ function describeMedia(message) {
     return {
       type: "document",
       fileName,
-      mimeType,
-      size,
-      documentId: document.id ? String(document.id) : null,
+      mimeType: document.mimeType || null,
+      size: document.size ? String(document.size) : null,
+      documentId: document.id
+        ? String(document.id)
+        : null,
       accessHash: document.accessHash
         ? String(document.accessHash)
         : null
@@ -74,8 +67,12 @@ function describeMedia(message) {
     return {
       type: "video",
       mimeType: message.video.mimeType || "video/mp4",
-      size: message.video.size ? String(message.video.size) : null,
-      videoId: message.video.id ? String(message.video.id) : null,
+      size: message.video.size
+        ? String(message.video.size)
+        : null,
+      videoId: message.video.id
+        ? String(message.video.id)
+        : null,
       accessHash: message.video.accessHash
         ? String(message.video.accessHash)
         : null
@@ -91,15 +88,22 @@ function describeMedia(message) {
 async function connectTelegram() {
   try {
     if (!apiId || !apiHash || !botToken) {
-      throw new Error("Telegram environment variables are missing");
+      throw new Error(
+        "Telegram environment variables are missing"
+      );
     }
 
-    console.log("Connecting PMF Telegram Bridge to Telegram...");
+    console.log(
+      "Connecting PMF Telegram Bridge to Telegram..."
+    );
 
     await client.start({
       botAuthToken: botToken,
       onError: (error) => {
-        console.error("Telegram client error:", error);
+        console.error(
+          "Telegram client error:",
+          error
+        );
       }
     });
 
@@ -110,11 +114,6 @@ async function connectTelegram() {
       `Telegram connected as @${telegramBot.username || "unknown"}`
     );
 
-    /*
-     * Listen for new Telegram messages.
-     * This is mainly used to confirm that the bridge can see
-     * the PMF Media Vault and its incoming media.
-     */
     client.addEventHandler(
       async (event) => {
         try {
@@ -126,7 +125,10 @@ async function connectTelegram() {
 
           if (!chat) return;
 
-          const chatId = chat.id ? String(chat.id) : null;
+          const chatId = chat.id
+            ? String(chat.id)
+            : null;
+
           const title = chat.title || null;
           const username = chat.username || null;
 
@@ -137,17 +139,34 @@ async function connectTelegram() {
             messageId: message.id
           };
 
-          console.log("Telegram message received:");
-          console.log(JSON.stringify(lastChat));
+          console.log(
+            "Telegram message received:"
+          );
+
+          console.log(
+            JSON.stringify(lastChat)
+          );
 
           /*
-           * Only inspect media belonging to PMF Media Vault.
+           * IMPORTANT:
+           * Keep the actual Telegram entity object.
+           * We will reuse this instead of trying to
+           * reconstruct the entity from a bare ID.
            */
           if (chatId === PMF_MEDIA_CHAT_ID) {
+            pmfMediaChat = chat;
+
+            console.log(
+              "PMF Media Vault entity captured."
+            );
+
             const media = describeMedia(message);
 
             if (media) {
-              console.log("PMF Media Vault media detected:");
+              console.log(
+                "PMF Media Vault media detected:"
+              );
+
               console.log(
                 JSON.stringify({
                   chatId,
@@ -170,33 +189,27 @@ async function connectTelegram() {
     telegramStatus = "error";
     telegramError = error.message;
 
-    console.error("Telegram connection failed:", error);
+    console.error(
+      "Telegram connection failed:",
+      error
+    );
   }
 }
 
-/*
- * Root
- */
 app.get("/", (_req, res) => {
   res.json({
     name: "PMF Telegram Bridge",
     status: "online",
-    version: "1.4.0"
+    version: "1.5.0"
   });
 });
 
-/*
- * Health check
- */
 app.get("/health", (_req, res) => {
   res.json({
     status: "ok"
   });
 });
 
-/*
- * Telegram connection status
- */
 app.get("/telegram-status", (_req, res) => {
   res.json({
     status: telegramStatus,
@@ -204,7 +217,8 @@ app.get("/telegram-status", (_req, res) => {
     bot: telegramBot
       ? {
           id: String(telegramBot.id),
-          username: telegramBot.username || null,
+          username:
+            telegramBot.username || null,
           isBot: telegramBot.bot === true
         }
       : null,
@@ -212,75 +226,86 @@ app.get("/telegram-status", (_req, res) => {
   });
 });
 
-/*
- * Last Telegram chat detected by the bridge.
- */
 app.get("/telegram-last-chat", (_req, res) => {
   res.json({
     chat: lastChat
   });
 });
 
-/*
- * Find the latest media message inside PMF Media Vault.
- *
- * IMPORTANT:
- * This endpoint only reads Telegram metadata.
- * It does NOT download or store the movie.
- */
-app.get("/telegram-latest-media", async (_req, res) => {
-  try {
-    if (telegramStatus !== "ready") {
-      return res.status(503).json({
-        error: "Telegram client is not ready",
-        status: telegramStatus
-      });
-    }
+app.get(
+  "/telegram-latest-media",
+  async (_req, res) => {
+    try {
+      if (telegramStatus !== "ready") {
+        return res.status(503).json({
+          error:
+            "Telegram client is not ready",
+          status: telegramStatus
+        });
+      }
 
-    const chat = await client.getEntity(PMF_MEDIA_CHAT_ID);
+      /*
+       * The bridge must first receive a message
+       * from PMF Media Vault after startup so that
+       * we have the real Telegram entity.
+       */
+      if (!pmfMediaChat) {
+        return res.status(404).json({
+          found: false,
+          error:
+            "PMF Media Vault entity has not been captured yet. Send a new message in the group and try again."
+        });
+      }
 
-    const messages = await client.getMessages(chat, {
-      limit: 50
-    });
+      const messages = await client.getMessages(
+        pmfMediaChat,
+        {
+          limit: 50
+        }
+      );
 
-    for (const message of messages) {
-      const media = describeMedia(message);
+      for (const message of messages) {
+        const media = describeMedia(message);
 
-      if (!media) continue;
+        if (!media) continue;
+
+        return res.json({
+          found: true,
+          chat: {
+            id: PMF_MEDIA_CHAT_ID,
+            title: "PMF Media Vault"
+          },
+          message: {
+            id: message.id,
+            date: message.date
+              ? new Date(
+                  message.date * 1000
+                ).toISOString()
+              : null,
+            text: message.message || null
+          },
+          media
+        });
+      }
 
       return res.json({
-        found: true,
-        chat: {
-          id: PMF_MEDIA_CHAT_ID,
-          title: "PMF Media Vault"
-        },
-        message: {
-          id: message.id,
-          date: message.date
-            ? new Date(message.date * 1000).toISOString()
-            : null,
-          text: message.message || null
-        },
-        media
+        found: false,
+        message:
+          "No supported media message was found in PMF Media Vault."
+      });
+    } catch (error) {
+      console.error(
+        "Latest Telegram media lookup failed:",
+        error
+      );
+
+      return res.status(500).json({
+        found: false,
+        error: error.message
       });
     }
-
-    return res.json({
-      found: false,
-      message: "No supported media message was found in PMF Media Vault."
-    });
-  } catch (error) {
-    console.error(
-      "Latest Telegram media lookup failed:",
-      error
-    );
-
-    return res.status(500).json({
-      found: false,
-      error: error.message
-    });
   }
-});
+);
 
 app.listen(PORT, () => {
   console.log(
