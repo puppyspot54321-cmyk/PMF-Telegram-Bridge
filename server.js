@@ -1,7 +1,6 @@
 import express from "express";
-import { TelegramClient } from "telegram";
+import { TelegramClient, Api, events } from "telegram";
 import { StringSession } from "telegram/sessions/index.js";
-import { Api } from "telegram";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -9,6 +8,7 @@ const PORT = process.env.PORT || 3000;
 let telegramStatus = "starting";
 let telegramError = null;
 let telegramBot = null;
+let lastChat = null;
 
 const apiId = Number(process.env.TELEGRAM_API_ID);
 const apiHash = process.env.TELEGRAM_API_HASH;
@@ -44,6 +44,36 @@ async function connectTelegram() {
     console.log(
       `Telegram connected as @${telegramBot.username || "unknown"}`
     );
+
+    client.addEventHandler(async (event) => {
+      try {
+        const message = event.message;
+
+        if (!message) return;
+
+        const chat = await message.getChat();
+
+        if (!chat) return;
+
+        const chatId = chat.id ? String(chat.id) : null;
+        const title = chat.title || null;
+        const username = chat.username || null;
+
+        lastChat = {
+          id: chatId,
+          title,
+          username,
+          messageId: message.id
+        };
+
+        console.log("Telegram message received:");
+        console.log(JSON.stringify(lastChat));
+
+      } catch (error) {
+        console.error("Telegram message inspection error:", error);
+      }
+    }, new events.NewMessage({}));
+
   } catch (error) {
     telegramStatus = "error";
     telegramError = error.message;
@@ -56,7 +86,7 @@ app.get("/", (_req, res) => {
   res.json({
     name: "PMF Telegram Bridge",
     status: "online",
-    version: "1.2.0"
+    version: "1.3.0"
   });
 });
 
@@ -81,43 +111,10 @@ app.get("/telegram-status", (_req, res) => {
   });
 });
 
-app.get("/telegram-chats", async (_req, res) => {
-  try {
-    if (telegramStatus !== "ready") {
-      return res.status(503).json({
-        error: "Telegram is not connected yet"
-      });
-    }
-
-    const dialogs = await client.getDialogs({
-      limit: 100
-    });
-
-    const chats = dialogs.map((dialog) => {
-      const entity = dialog.entity;
-
-      return {
-        id: entity?.id ? String(entity.id) : null,
-        title: entity?.title || null,
-        username: entity?.username || null,
-        isGroup: Boolean(
-          entity?.className === "Chat" ||
-          entity?.className === "Channel"
-        )
-      };
-    });
-
-    res.json({
-      count: chats.length,
-      chats
-    });
-  } catch (error) {
-    console.error("Telegram chats error:", error);
-
-    res.status(500).json({
-      error: error.message
-    });
-  }
+app.get("/telegram-last-chat", (_req, res) => {
+  res.json({
+    chat: lastChat
+  });
 });
 
 app.listen(PORT, () => {
