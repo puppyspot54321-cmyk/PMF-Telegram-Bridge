@@ -1,5 +1,6 @@
 import express from "express";
-import { TelegramClient, Api, events } from "telegram";
+import { TelegramClient } from "telegram";
+import { NewMessage } from "telegram/events/index.js";
 import { StringSession } from "telegram/sessions/index.js";
 
 const app = express();
@@ -72,7 +73,7 @@ async function connectTelegram() {
       } catch (error) {
         console.error("Telegram message inspection error:", error);
       }
-    }, new events.NewMessage({}));
+    }, new NewMessage({}));
 
   } catch (error) {
     telegramStatus = "error";
