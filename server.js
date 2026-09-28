@@ -21,6 +21,9 @@ const STREAM_FETCH_CHUNK_SIZE =
 const STREAM_FETCH_REQUEST_SIZE =
   4 * 1024 * 1024;
 
+const DELIVERY_CHUNK_SIZE =
+  256 * 1024;
+
 let telegramStatus = "starting";
 let telegramError = null;
 let telegramBot = null;
@@ -576,7 +579,7 @@ async function fetchTelegramBuffer(
     parts,
     total
   );
- }
+}
 
 async function prepareNextBuffer(
   startByte,
@@ -975,7 +978,7 @@ app.get(
         "online",
 
       version:
-        "2.5.0"
+        "2.6.0"
     });
   }
 );
@@ -1179,6 +1182,7 @@ app.get(
       }
 
       let startByte = 0;
+
       let endByte =
         totalSize - 1;
 
@@ -1324,7 +1328,10 @@ app.get(
           "bytes",
 
         "Cache-Control":
-          "no-store"
+          "no-store",
+
+        "X-PMF-Stream":
+          "2.6.0"
       });
 
       if (partial) {
@@ -1422,6 +1429,7 @@ app.get(
 
         const bytesToWrite =
           Math.min(
+            DELIVERY_CHUNK_SIZE,
             available,
             remaining
           );
@@ -1509,6 +1517,11 @@ app.get(
             }
           }
         }
+
+        await new Promise(
+          (resolve) =>
+            setImmediate(resolve)
+        );
       }
 
       if (
