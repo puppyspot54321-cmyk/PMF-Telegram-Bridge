@@ -962,10 +962,10 @@ app.get(
             contentLength,
 
           chunkSize:
-        2 * 1024 * 1024,
+         1 * 1024 * 1024,
 
-         requestSize:
-        2 * 1024 * 1024
+          requestSize:
+         1 * 1024 * 1024
         });
 
       for await (
