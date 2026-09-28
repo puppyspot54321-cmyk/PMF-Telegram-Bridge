@@ -9,11 +9,19 @@ const PORT = process.env.PORT || 3000;
 
 const PMF_MEDIA_CHAT_ID = "4490224317";
 
+const STREAM_BUFFER_SIZE = 8 * 1024 * 1024;
+const STREAM_FETCH_CHUNK_SIZE = 1 * 1024 * 1024;
+const STREAM_FETCH_REQUEST_SIZE = 4 * 1024 * 1024;
+
 let telegramStatus = "starting";
 let telegramError = null;
 let telegramBot = null;
 let lastChat = null;
 let lastMediaMessage = null;
+
+let streamBuffer = null;
+let streamBufferPromise = null;
+let streamPrefetchPromise = null;
 
 const apiId = Number(process.env.TELEGRAM_API_ID);
 const apiHash = process.env.TELEGRAM_API_HASH;
@@ -29,6 +37,12 @@ const client = new TelegramClient(
   apiHash,
   { connectionRetries: 5 }
 );
+
+function clearStreamBuffer() {
+  streamBuffer = null;
+  streamBufferPromise = null;
+  streamPrefetchPromise = null;
+}
 
 function getFileReference(mediaObject) {
   if (!mediaObject?.fileReference) {
@@ -81,25 +95,19 @@ function describeMedia(message) {
 
     return {
       type: "document",
-
       fileName,
-
       mimeType:
         document.mimeType ||
         "application/octet-stream",
-
       size: document.size
         ? String(document.size)
         : null,
-
       documentId: document.id
         ? String(document.id)
         : null,
-
       accessHash: document.accessHash
         ? String(document.accessHash)
         : null,
-
       fileReference:
         getFileReference(document)
     };
@@ -108,23 +116,18 @@ function describeMedia(message) {
   if (message.video) {
     return {
       type: "video",
-
       mimeType:
         message.video.mimeType ||
         "video/mp4",
-
       size: message.video.size
         ? String(message.video.size)
         : null,
-
       videoId: message.video.id
         ? String(message.video.id)
         : null,
-
       accessHash: message.video.accessHash
         ? String(message.video.accessHash)
         : null,
-
       fileReference:
         getFileReference(message.video)
     };
@@ -132,7 +135,6 @@ function describeMedia(message) {
 
   return {
     type: "other",
-
     mediaClass:
       message.media.className || null
   };
@@ -150,40 +152,30 @@ async function persistTelegramMedia({
     console.warn(
       "Supabase persistence skipped: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing."
     );
-
     return;
   }
 
   const payload = {
     chat_id: String(chatId),
-
     message_id: Number(message.id),
-
     document_id:
       media.documentId ||
       media.videoId ||
       null,
-
     access_hash:
       media.accessHash || null,
-
     file_name:
       media.fileName || null,
-
     mime_type:
       media.mimeType || null,
-
     file_size:
       media.size
         ? Number(media.size)
         : null,
-
     media_kind:
       media.type || null,
-
     file_reference:
       media.fileReference || null,
-
     updated_at:
       new Date().toISOString()
   };
@@ -192,21 +184,16 @@ async function persistTelegramMedia({
     `${supabaseUrl}/rest/v1/telegram_media_refs`,
     {
       method: "POST",
-
       headers: {
         apikey:
           supabaseServiceRoleKey,
-
         Authorization:
           `Bearer ${supabaseServiceRoleKey}`,
-
         "Content-Type":
           "application/json",
-
         Prefer:
           "resolution=merge-duplicates,return=minimal"
       },
-
       body: JSON.stringify(payload)
     }
   );
@@ -244,7 +231,6 @@ async function restoreLatestTelegramMedia() {
     console.warn(
       "Media restore skipped: Supabase environment variables are missing."
     );
-
     return;
   }
 
@@ -263,7 +249,6 @@ async function restoreLatestTelegramMedia() {
         headers: {
           apikey:
             supabaseServiceRoleKey,
-
           Authorization:
             `Bearer ${supabaseServiceRoleKey}`
         }
@@ -289,7 +274,6 @@ async function restoreLatestTelegramMedia() {
       console.log(
         "No persisted Telegram media reference found."
       );
-
       return;
     }
 
@@ -303,7 +287,6 @@ async function restoreLatestTelegramMedia() {
       console.warn(
         "Latest persisted Telegram media reference is incomplete."
       );
-
       return;
     }
 
@@ -316,39 +299,30 @@ async function restoreLatestTelegramMedia() {
       console.warn(
         "Could not decode persisted Telegram file reference."
       );
-
       return;
     }
 
     const inputLocation =
       new Api.InputDocumentFileLocation({
         id: bigInt(row.document_id),
-
         accessHash:
           bigInt(row.access_hash),
-
         fileReference,
-
         thumbSize: ""
       });
 
     const restoredDocument = {
       id: bigInt(row.document_id),
-
       accessHash:
         bigInt(row.access_hash),
-
       fileReference,
-
       mimeType:
         row.mime_type ||
         "video/mp4",
-
       size:
         row.file_size
           ? bigInt(row.file_size)
           : null,
-
       attributes: []
     };
 
@@ -360,32 +334,27 @@ async function restoreLatestTelegramMedia() {
     lastMediaMessage = {
       id:
         Number(row.message_id),
-
       date:
         Math.floor(
           updatedAt.getTime() /
             1000
         ),
-
       message: null,
-
       media:
         inputLocation,
-
       document:
         restoredDocument
     };
 
+    clearStreamBuffer();
+
     lastChat = {
       id:
         String(row.chat_id),
-
       title:
         "PMF Media Vault",
-
       username:
         null,
-
       messageId:
         Number(row.message_id)
     };
@@ -398,13 +367,10 @@ async function restoreLatestTelegramMedia() {
       JSON.stringify({
         chatId:
           row.chat_id,
-
         messageId:
           row.message_id,
-
         documentId:
           row.document_id,
-
         fileSize:
           row.file_size
       })
@@ -415,6 +381,192 @@ async function restoreLatestTelegramMedia() {
       error
     );
   }
+}
+
+async function fetchTelegramBuffer(
+  startByte,
+  length,
+  mediaMessage
+) {
+  if (
+    !mediaMessage?.media ||
+    length <= 0
+  ) {
+    return Buffer.alloc(0);
+  }
+
+  const iterator =
+    client.iterDownload({
+      file:
+        mediaMessage.media,
+      offset:
+        bigInt(startByte),
+      limit:
+        length,
+      chunkSize:
+        STREAM_FETCH_CHUNK_SIZE,
+      requestSize:
+        STREAM_FETCH_REQUEST_SIZE
+    });
+
+  const parts = [];
+  let total = 0;
+
+  for await (
+    const chunk of iterator
+  ) {
+    const buffer =
+      Buffer.from(chunk);
+
+    parts.push(buffer);
+    total +=
+      buffer.length;
+  }
+
+  return Buffer.concat(
+    parts,
+    total
+  );
+  }
+
+async function ensureStreamBuffer(
+  startByte,
+  totalSize,
+  mediaMessage
+) {
+  if (
+    streamBuffer &&
+    streamBuffer.messageId ===
+      mediaMessage.id &&
+    startByte >=
+      streamBuffer.start &&
+    startByte <=
+      streamBuffer.end
+  ) {
+    return streamBuffer;
+  }
+
+  if (streamBufferPromise) {
+    await streamBufferPromise;
+
+    if (
+      streamBuffer &&
+      streamBuffer.messageId ===
+        mediaMessage.id &&
+      startByte >=
+        streamBuffer.start &&
+      startByte <=
+        streamBuffer.end
+    ) {
+      return streamBuffer;
+    }
+  }
+
+  const length =
+    Math.min(
+      STREAM_BUFFER_SIZE,
+      totalSize - startByte
+    );
+
+  streamBufferPromise =
+    (async () => {
+      const buffer =
+        await fetchTelegramBuffer(
+          startByte,
+          length,
+          mediaMessage
+        );
+
+      if (
+        lastMediaMessage !==
+        mediaMessage
+      ) {
+        return null;
+      }
+
+      streamBuffer = {
+        messageId:
+          mediaMessage.id,
+        start:
+          startByte,
+        end:
+          startByte +
+          buffer.length -
+          1,
+        buffer
+      };
+
+      return streamBuffer;
+    })();
+
+  try {
+    return await streamBufferPromise;
+  } finally {
+    streamBufferPromise =
+      null;
+  }
+}
+
+function prefetchNextBuffer(
+  currentEnd,
+  totalSize,
+  mediaMessage
+) {
+  const nextStart =
+    currentEnd + 1;
+
+  if (
+    nextStart >= totalSize ||
+    lastMediaMessage !==
+      mediaMessage ||
+    streamPrefetchPromise
+  ) {
+    return;
+  }
+
+  streamPrefetchPromise =
+    (async () => {
+      const length =
+        Math.min(
+          STREAM_BUFFER_SIZE,
+          totalSize -
+            nextStart
+        );
+
+      const buffer =
+        await fetchTelegramBuffer(
+          nextStart,
+          length,
+          mediaMessage
+        );
+
+      if (
+        lastMediaMessage ===
+        mediaMessage
+      ) {
+        streamBuffer = {
+          messageId:
+            mediaMessage.id,
+          start:
+            nextStart,
+          end:
+            nextStart +
+            buffer.length -
+            1,
+          buffer
+        };
+      }
+    })()
+      .catch((error) => {
+        console.warn(
+          "Telegram background prefetch failed:",
+          error.message
+        );
+      })
+      .finally(() => {
+        streamPrefetchPromise =
+          null;
+      });
 }
 
 async function connectTelegram() {
@@ -434,7 +586,8 @@ async function connectTelegram() {
     );
 
     await client.start({
-      botAuthToken: botToken,
+      botAuthToken:
+        botToken,
 
       onError: (error) => {
         console.error(
@@ -447,7 +600,8 @@ async function connectTelegram() {
     telegramBot =
       await client.getMe();
 
-    telegramStatus = "ready";
+    telegramStatus =
+      "ready";
 
     console.log(
       `Telegram connected as @${
@@ -484,11 +638,8 @@ async function connectTelegram() {
 
           lastChat = {
             id: chatId,
-
             title,
-
             username,
-
             messageId:
               message.id
           };
@@ -522,6 +673,8 @@ async function connectTelegram() {
           lastMediaMessage =
             message;
 
+          clearStreamBuffer();
+
           console.log(
             "PMF Media Vault media captured:"
           );
@@ -529,10 +682,8 @@ async function connectTelegram() {
           console.log(
             JSON.stringify({
               chatId,
-
               messageId:
                 message.id,
-
               media
             })
           );
@@ -540,9 +691,7 @@ async function connectTelegram() {
           try {
             await persistTelegramMedia({
               chatId,
-
               message,
-
               media
             });
           } catch (error) {
@@ -562,7 +711,8 @@ async function connectTelegram() {
       new NewMessage({})
     );
   } catch (error) {
-    telegramStatus = "error";
+    telegramStatus =
+      "error";
 
     telegramError =
       error.message;
@@ -578,12 +728,10 @@ app.get("/", (_req, res) => {
   res.json({
     name:
       "PMF Telegram Bridge",
-
     status:
       "online",
-
     version:
-      "2.3.0"
+      "2.4.0"
   });
 });
 
@@ -947,38 +1095,92 @@ app.get(
         );
       }
 
-      const telegramOffset =
-        bigInt(startByte);
+      res.flushHeaders?.();
 
-      const iterator =
-        client.iterDownload({
-          file:
-            lastMediaMessage.media,
+      const mediaMessage =
+        lastMediaMessage;
 
-          offset:
-            telegramOffset,
+      let bufferState =
+        await ensureStreamBuffer(
+          startByte,
+          totalSize,
+          mediaMessage
+        );
 
-          limit:
-            contentLength,
+      if (
+        !bufferState ||
+        !bufferState.buffer.length
+      ) {
+        throw new Error(
+          "Unable to prepare Telegram stream buffer."
+        );
+      }
 
-          chunkSize:
-         1 * 1024 * 1024,
+      let currentByte =
+        startByte;
 
-          requestSize:
-         1 * 1024 * 1024
-        });
+      const streamEnd =
+        endByte;
 
-      for await (
-        const chunk of iterator
+      while (
+        currentByte <=
+          streamEnd &&
+        !res.destroyed
       ) {
         if (
-          res.destroyed
+          !bufferState ||
+          bufferState.messageId !==
+            mediaMessage.id ||
+          currentByte <
+            bufferState.start ||
+          currentByte >
+            bufferState.end
         ) {
-          break;
+          bufferState =
+            await ensureStreamBuffer(
+              currentByte,
+              totalSize,
+              mediaMessage
+            );
+
+          if (
+            !bufferState ||
+            !bufferState.buffer.length
+          ) {
+            throw new Error(
+              "Unable to refill Telegram stream buffer."
+            );
+          }
         }
 
+        const offsetInBuffer =
+          currentByte -
+          bufferState.start;
+
+        const available =
+          bufferState.buffer.length -
+          offsetInBuffer;
+
+        const remaining =
+          streamEnd -
+          currentByte +
+          1;
+
+        const bytesToWrite =
+          Math.min(
+            available,
+            remaining
+          );
+
+        const slice =
+          bufferState.buffer.subarray(
+            offsetInBuffer,
+            offsetInBuffer +
+              bytesToWrite
+          );
+
         if (
-          !res.write(chunk)
+          !res.write(slice)
         ) {
           await new Promise(
             (resolve) =>
@@ -987,6 +1189,49 @@ app.get(
                 resolve
               )
           );
+        }
+
+        currentByte +=
+          bytesToWrite;
+
+        if (
+          currentByte >
+            bufferState.end &&
+          currentByte <=
+            streamEnd
+        ) {
+          const completedEnd =
+            bufferState.end;
+
+          prefetchNextBuffer(
+            completedEnd,
+            totalSize,
+            mediaMessage
+          );
+
+          if (
+            streamPrefetchPromise
+          ) {
+            await streamPrefetchPromise;
+          }
+
+          if (
+            streamBuffer &&
+            streamBuffer.messageId ===
+              mediaMessage.id &&
+            streamBuffer.start ===
+              currentByte
+          ) {
+            bufferState =
+              streamBuffer;
+          } else {
+            bufferState =
+              await ensureStreamBuffer(
+                currentByte,
+                totalSize,
+                mediaMessage
+              );
+          }
         }
       }
 
