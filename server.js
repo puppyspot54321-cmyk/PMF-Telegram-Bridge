@@ -476,9 +476,9 @@ app.get("/telegram-media", async (req, res) => {
 
         limit: contentLength,
 
-        chunkSize: 512 * 1024,
-
-        requestSize: 512 * 1024
+        chunkSize: 4 * 1024 * 1024,
+        
+        requestSize: 4 * 1024 * 1024
       });
 
     for await (const chunk of iterator) {
