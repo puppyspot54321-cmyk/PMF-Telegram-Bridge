@@ -170,25 +170,33 @@ async function getMappedTelegramMedia(movieId) {
     );
   }
 
-  /*
-   * Get the actual Telegram message from the
-   * PMF Media Vault. This gives GramJS a valid
-   * Message/Document object for iterDownload().
-   */
-  const messages =
-    await client.getMessages(
-      String(
-        row.chat_id ||
-        PMF_MEDIA_CHAT_ID
-      ),
-      {
-        ids: [
-          Number(
-            row.message_id
-          )
-        ]
-      }
-    );
+/*
+ * Telegram supergroups/channels use the
+ * -100... peer format for entity lookups.
+ * Supabase stores the raw channel ID.
+ */
+const rawChatId =
+  String(
+    row.chat_id ||
+    PMF_MEDIA_CHAT_ID
+  );
+
+const telegramChatId =
+  rawChatId.startsWith("-100")
+    ? rawChatId
+    : "-100" + rawChatId;
+
+const messages =
+  await client.getMessages(
+    telegramChatId,
+    {
+      ids: [
+        Number(
+          row.message_id
+        )
+      ]
+    }
+  );
 
   const message =
     messages?.[0];
