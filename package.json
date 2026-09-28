@@ -8,7 +8,7 @@
     "dev": "node --watch server.js"
   },
   "dependencies": {
-    "big-integer": "^1.6.52"
+    "big-integer": "^1.6.52",
     "express": "^5.1.0",
     "telegram": "^2.26.22"
   }
