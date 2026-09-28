@@ -1,5 +1,5 @@
 import express from "express";
-import { TelegramClient } from "telegram";
+import { TelegramClient, Api } from "telegram";
 import { NewMessage } from "telegram/events/index.js";
 import { StringSession } from "telegram/sessions/index.js";
 import bigInt from "big-integer";
@@ -44,6 +44,21 @@ function getFileReference(mediaObject) {
   }
 }
 
+function decodeFileReference(value) {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    return Buffer.from(
+      value,
+      "base64"
+    );
+  } catch {
+    return null;
+  }
+}
+
 function describeMedia(message) {
   if (!message?.media) return null;
 
@@ -66,7 +81,9 @@ function describeMedia(message) {
 
     return {
       type: "document",
+
       fileName,
+
       mimeType:
         document.mimeType ||
         "application/octet-stream",
@@ -115,6 +132,7 @@ function describeMedia(message) {
 
   return {
     type: "other",
+
     mediaClass:
       message.media.className || null
   };
@@ -218,9 +236,194 @@ async function persistTelegramMedia({
   );
 }
 
+async function restoreLatestTelegramMedia() {
+  if (
+    !supabaseUrl ||
+    !supabaseServiceRoleKey
+  ) {
+    console.warn(
+      "Media restore skipped: Supabase environment variables are missing."
+    );
+
+    return;
+  }
+
+  try {
+    const query =
+      `${supabaseUrl}/rest/v1/telegram_media_refs` +
+      `?chat_id=eq.${encodeURIComponent(
+        PMF_MEDIA_CHAT_ID
+      )}` +
+      `&order=updated_at.desc` +
+      `&limit=1`;
+
+    const response = await fetch(
+      query,
+      {
+        headers: {
+          apikey:
+            supabaseServiceRoleKey,
+
+          Authorization:
+            `Bearer ${supabaseServiceRoleKey}`
+        }
+      }
+    );
+
+    if (!response.ok) {
+      const errorText =
+        await response.text();
+
+      throw new Error(
+        `Supabase media restore failed (${response.status}): ${errorText}`
+      );
+    }
+
+    const rows =
+      await response.json();
+
+    if (
+      !Array.isArray(rows) ||
+      rows.length === 0
+    ) {
+      console.log(
+        "No persisted Telegram media reference found."
+      );
+
+      return;
+    }
+
+    const row = rows[0];
+
+    if (
+      !row.document_id ||
+      !row.access_hash ||
+      !row.file_reference
+    ) {
+      console.warn(
+        "Latest persisted Telegram media reference is incomplete."
+      );
+
+      return;
+    }
+
+    const fileReference =
+      decodeFileReference(
+        row.file_reference
+      );
+
+    if (!fileReference) {
+      console.warn(
+        "Could not decode persisted Telegram file reference."
+      );
+
+      return;
+    }
+
+    const inputLocation =
+      new Api.InputDocumentFileLocation({
+        id: bigInt(row.document_id),
+
+        accessHash:
+          bigInt(row.access_hash),
+
+        fileReference,
+
+        thumbSize: ""
+      });
+
+    const restoredDocument = {
+      id: bigInt(row.document_id),
+
+      accessHash:
+        bigInt(row.access_hash),
+
+      fileReference,
+
+      mimeType:
+        row.mime_type ||
+        "video/mp4",
+
+      size:
+        row.file_size
+          ? bigInt(row.file_size)
+          : null,
+
+      attributes: []
+    };
+
+    const updatedAt =
+      row.updated_at
+        ? new Date(row.updated_at)
+        : new Date();
+
+    lastMediaMessage = {
+      id:
+        Number(row.message_id),
+
+      date:
+        Math.floor(
+          updatedAt.getTime() /
+            1000
+        ),
+
+      message: null,
+
+      media:
+        inputLocation,
+
+      document:
+        restoredDocument
+    };
+
+    lastChat = {
+      id:
+        String(row.chat_id),
+
+      title:
+        "PMF Media Vault",
+
+      username:
+        null,
+
+      messageId:
+        Number(row.message_id)
+    };
+
+    console.log(
+      "Persisted Telegram media reference restored:"
+    );
+
+    console.log(
+      JSON.stringify({
+        chatId:
+          row.chat_id,
+
+        messageId:
+          row.message_id,
+
+        documentId:
+          row.document_id,
+
+        fileSize:
+          row.file_size
+      })
+    );
+  } catch (error) {
+    console.error(
+      "Failed to restore persisted Telegram media:",
+      error
+    );
+  }
+}
+
 async function connectTelegram() {
   try {
-    if (!apiId || !apiHash || !botToken) {
+    if (
+      !apiId ||
+      !apiHash ||
+      !botToken
+    ) {
       throw new Error(
         "Telegram environment variables are missing"
       );
@@ -253,6 +456,8 @@ async function connectTelegram() {
       }`
     );
 
+    await restoreLatestTelegramMedia();
+
     client.addEventHandler(
       async (event) => {
         try {
@@ -266,9 +471,10 @@ async function connectTelegram() {
 
           if (!chat) return;
 
-          const chatId = chat.id
-            ? String(chat.id)
-            : null;
+          const chatId =
+            chat.id
+              ? String(chat.id)
+              : null;
 
           const title =
             chat.title || null;
@@ -278,8 +484,11 @@ async function connectTelegram() {
 
           lastChat = {
             id: chatId,
+
             title,
+
             username,
+
             messageId:
               message.id
           };
@@ -320,8 +529,10 @@ async function connectTelegram() {
           console.log(
             JSON.stringify({
               chatId,
+
               messageId:
                 message.id,
+
               media
             })
           );
@@ -329,7 +540,9 @@ async function connectTelegram() {
           try {
             await persistTelegramMedia({
               chatId,
+
               message,
+
               media
             });
           } catch (error) {
@@ -366,15 +579,18 @@ app.get("/", (_req, res) => {
     name:
       "PMF Telegram Bridge",
 
-    status: "online",
+    status:
+      "online",
 
-    version: "2.2.0"
+    version:
+      "2.3.0"
   });
 });
 
 app.get("/health", (_req, res) => {
   res.json({
-    status: "ok"
+    status:
+      "ok"
   });
 });
 
@@ -416,7 +632,8 @@ app.get(
   "/telegram-last-chat",
   (_req, res) => {
     res.json({
-      chat: lastChat
+      chat:
+        lastChat
     });
   }
 );
@@ -432,7 +649,8 @@ app.get(
         return res
           .status(503)
           .json({
-            found: false,
+            found:
+              false,
 
             error:
               "Telegram client is not ready",
@@ -446,10 +664,11 @@ app.get(
         return res
           .status(404)
           .json({
-            found: false,
+            found:
+              false,
 
             error:
-              "No media has been captured yet. Send a new media message in PMF Media Vault."
+              "No media has been captured or restored yet."
           });
       }
 
@@ -498,7 +717,9 @@ app.get(
       return res
         .status(500)
         .json({
-          found: false,
+          found:
+            false,
+
           error:
             error.message
         });
@@ -532,7 +753,7 @@ app.get(
           .status(404)
           .json({
             error:
-              "No media has been captured yet. Send a new media message in PMF Media Vault."
+              "No media has been captured or restored yet."
           });
       }
 
@@ -561,6 +782,7 @@ app.get(
       }
 
       let startByte = 0;
+
       let endByte =
         totalSize - 1;
 
@@ -577,8 +799,10 @@ app.get(
 
         if (
           !match ||
-          (match[1] === "" &&
-            match[2] === "")
+          (
+            match[1] === "" &&
+            match[2] === ""
+          )
         ) {
           return res
             .status(416)
@@ -590,7 +814,9 @@ app.get(
             .end();
         }
 
-        if (match[1] === "") {
+        if (
+          match[1] === ""
+        ) {
           const suffixLength =
             Number(match[2]);
 
@@ -677,7 +903,9 @@ app.get(
         1;
 
       res.status(
-        partial ? 206 : 200
+        partial
+          ? 206
+          : 200
       );
 
       res.set({
@@ -743,8 +971,11 @@ app.get(
       for await (
         const chunk of iterator
       ) {
-        if (res.destroyed)
+        if (
+          res.destroyed
+        ) {
           break;
+        }
 
         if (
           !res.write(chunk)
@@ -759,7 +990,9 @@ app.get(
         }
       }
 
-      if (!res.destroyed) {
+      if (
+        !res.destroyed
+      ) {
         res.end();
       }
     } catch (error) {
@@ -768,7 +1001,9 @@ app.get(
         error
       );
 
-      if (!res.headersSent) {
+      if (
+        !res.headersSent
+      ) {
         return res
           .status(500)
           .json({
@@ -782,10 +1017,13 @@ app.get(
   }
 );
 
-app.listen(PORT, () => {
-  console.log(
-    `PMF Telegram Bridge listening on port ${PORT}`
-  );
+app.listen(
+  PORT,
+  () => {
+    console.log(
+      `PMF Telegram Bridge listening on port ${PORT}`
+    );
 
-  void connectTelegram();
-});
+    void connectTelegram();
+  }
+);
