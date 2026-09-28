@@ -1661,10 +1661,9 @@ async function streamTelegramMedia(req, res) {
           });
       }
 
-      res.destroy(error);
+            res.destroy(error);
     }
   }
-}
 
 app.get(
   "/telegram-media",
