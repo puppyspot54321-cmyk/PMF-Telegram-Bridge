@@ -12,10 +12,10 @@ const PMF_MEDIA_CHAT_ID = "4490224317";
 const STREAM_BUFFER_SIZE =
   8 * 1024 * 1024;
 
-const STREAM_PREFETCH_TRIGGER =
-  3 * 1024 * 1024;
+const STARTUP_BUFFER_SIZE =
+  2 * 1024 * 1024;
 
-const STREAM_FETCH_CHUNK_SIZE =
+const STREAM_PREFETCH_TRIGGER =
   1 * 1024 * 1024;
 
 const STREAM_FETCH_REQUEST_SIZE =
@@ -691,9 +691,14 @@ async function prepareNextBuffer(
     return nextStreamBufferPromise;
   }
 
+  const bufferSize =
+    startByte === 0
+      ? STARTUP_BUFFER_SIZE
+      : STREAM_BUFFER_SIZE;
+
   const length =
     Math.min(
-      STREAM_BUFFER_SIZE,
+      bufferSize,
       totalSize -
         startByte
     );
