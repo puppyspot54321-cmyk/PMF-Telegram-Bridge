@@ -830,9 +830,14 @@ async function getStreamBuffer(
     }
   }
 
+    const bufferSize =
+    startByte === 0
+      ? STARTUP_BUFFER_SIZE
+      : STREAM_BUFFER_SIZE;
+
   const length =
     Math.min(
-      STREAM_BUFFER_SIZE,
+      bufferSize,
       totalSize -
         startByte
     );
