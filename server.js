@@ -2,6 +2,7 @@ import express from "express";
 import { TelegramClient } from "telegram";
 import { NewMessage } from "telegram/events/index.js";
 import { StringSession } from "telegram/sessions/index.js";
+import bigInt from "big-integer";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -22,15 +23,11 @@ const client = new TelegramClient(
   new StringSession(""),
   apiId,
   apiHash,
-  {
-    connectionRetries: 5
-  }
+  { connectionRetries: 5 }
 );
 
 function describeMedia(message) {
-  if (!message?.media) {
-    return null;
-  }
+  if (!message?.media) return null;
 
   const document = message.document;
 
@@ -54,9 +51,7 @@ function describeMedia(message) {
       fileName,
       mimeType: document.mimeType || "application/octet-stream",
       size: document.size ? String(document.size) : null,
-      documentId: document.id
-        ? String(document.id)
-        : null,
+      documentId: document.id ? String(document.id) : null,
       accessHash: document.accessHash
         ? String(document.accessHash)
         : null
@@ -66,8 +61,7 @@ function describeMedia(message) {
   if (message.video) {
     return {
       type: "video",
-      mimeType:
-        message.video.mimeType || "video/mp4",
+      mimeType: message.video.mimeType || "video/mp4",
       size: message.video.size
         ? String(message.video.size)
         : null,
@@ -82,8 +76,7 @@ function describeMedia(message) {
 
   return {
     type: "other",
-    mediaClass:
-      message.media.className || null
+    mediaClass: message.media.className || null
   };
 }
 
@@ -133,11 +126,8 @@ async function connectTelegram() {
             ? String(chat.id)
             : null;
 
-          const title =
-            chat.title || null;
-
-          const username =
-            chat.username || null;
+          const title = chat.title || null;
+          const username = chat.username || null;
 
           lastChat = {
             id: chatId,
@@ -158,8 +148,7 @@ async function connectTelegram() {
             return;
           }
 
-          const media =
-            describeMedia(message);
+          const media = describeMedia(message);
 
           if (!media) {
             console.log(
@@ -168,16 +157,6 @@ async function connectTelegram() {
             return;
           }
 
-          /*
-           * IMPORTANT:
-           * Capture the actual Telegram message object.
-           *
-           * We do NOT call getMessages() or
-           * messages.GetHistory().
-           *
-           * The media will be streamed directly
-           * from this captured Telegram message.
-           */
           lastMediaMessage = message;
 
           console.log(
@@ -215,7 +194,7 @@ app.get("/", (_req, res) => {
   res.json({
     name: "PMF Telegram Bridge",
     status: "online",
-    version: "2.0.0"
+    version: "2.1.0"
   });
 });
 
@@ -228,29 +207,24 @@ app.get("/health", (_req, res) => {
 app.get("/telegram-status", (_req, res) => {
   res.json({
     status: telegramStatus,
-    connected:
-      telegramStatus === "ready",
+    connected: telegramStatus === "ready",
     bot: telegramBot
       ? {
           id: String(telegramBot.id),
           username:
             telegramBot.username || null,
-          isBot:
-            telegramBot.bot === true
+          isBot: telegramBot.bot === true
         }
       : null,
     error: telegramError
   });
 });
 
-app.get(
-  "/telegram-last-chat",
-  (_req, res) => {
-    res.json({
-      chat: lastChat
-    });
-  }
-);
+app.get("/telegram-last-chat", (_req, res) => {
+  res.json({
+    chat: lastChat
+  });
+});
 
 app.get(
   "/telegram-latest-media",
@@ -294,8 +268,7 @@ app.get(
             : null,
 
           text:
-            lastMediaMessage.message ||
-            null
+            lastMediaMessage.message || null
         },
 
         media
@@ -314,71 +287,76 @@ app.get(
   }
 );
 
-/*
- * Direct Telegram media streaming endpoint.
- *
- * Supports:
- * - normal playback
- * - HTTP Range requests
- * - seeking
- * - partial downloads
- *
- * The movie is NOT permanently stored
- * on Render.
- */
-app.get(
-  "/telegram-media",
-  async (req, res) => {
-    try {
-      if (telegramStatus !== "ready") {
-        return res.status(503).json({
-          error:
-            "Telegram client is not ready",
-          status: telegramStatus
-        });
-      }
+app.get("/telegram-media", async (req, res) => {
+  try {
+    if (telegramStatus !== "ready") {
+      return res.status(503).json({
+        error:
+          "Telegram client is not ready",
+        status: telegramStatus
+      });
+    }
 
-      if (!lastMediaMessage?.media) {
-        return res.status(404).json({
-          error:
-            "No media has been captured yet. Send a new media message in PMF Media Vault."
-        });
-      }
+    if (!lastMediaMessage?.media) {
+      return res.status(404).json({
+        error:
+          "No media has been captured yet. Send a new media message in PMF Media Vault."
+      });
+    }
 
-      const media =
-        describeMedia(lastMediaMessage);
+    const media =
+      describeMedia(lastMediaMessage);
 
-      const totalSize = Number(
-        media?.size || 0
-      );
+    const totalSize = Number(
+      media?.size || 0
+    );
+
+    if (
+      !Number.isSafeInteger(totalSize) ||
+      totalSize <= 0
+    ) {
+      return res.status(500).json({
+        error:
+          "Captured media does not contain a valid file size."
+      });
+    }
+
+    let startByte = 0;
+    let endByte = totalSize - 1;
+    let partial = false;
+
+    const rangeHeader =
+      req.headers.range;
+
+    if (rangeHeader) {
+      const match =
+        /^bytes=(\d*)-(\d*)$/.exec(
+          rangeHeader.trim()
+        );
 
       if (
-        !Number.isSafeInteger(totalSize) ||
-        totalSize <= 0
+        !match ||
+        (match[1] === "" &&
+          match[2] === "")
       ) {
-        return res.status(500).json({
-          error:
-            "Captured media does not contain a valid file size."
-        });
+        return res
+          .status(416)
+          .set(
+            "Content-Range",
+            "bytes */" + totalSize
+          )
+          .end();
       }
 
-      let startByte = 0;
-      let endByte = totalSize - 1;
-      let partial = false;
-
-      const rangeHeader =
-        req.headers.range;
-
-      if (rangeHeader) {
-        const match =
-          /^bytes=(\d*)-(\d*)$/.exec(
-            rangeHeader.trim()
-          );
+      if (match[1] === "") {
+        const suffixLength =
+          Number(match[2]);
 
         if (
-          !match ||
-          (match[1] === "" &&
-            match[2] === "")
+          !Number.isSafeInteger(
+            suffixLength
+          ) ||
+          suffixLength <= 0
         ) {
           return res
             .status(416)
@@ -389,179 +367,152 @@ app.get(
             .end();
         }
 
-        if (match[1] === "") {
-          const suffixLength =
-            Number(match[2]);
+        startByte = Math.max(
+          totalSize - suffixLength,
+          0
+        );
+      } else {
+        startByte = Number(match[1]);
 
-          if (
-            !Number.isSafeInteger(
-              suffixLength
-            ) ||
-            suffixLength <= 0
-          ) {
-            return res
-              .status(416)
-              .set(
-                "Content-Range",
-                "bytes */" + totalSize
-              )
-              .end();
-          }
-
-          startByte = Math.max(
-            totalSize - suffixLength,
-            0
-          );
-        } else {
-          startByte =
-            Number(match[1]);
-
-          if (
-            !Number.isSafeInteger(
-              startByte
-            ) ||
-            startByte >= totalSize
-          ) {
-            return res
-              .status(416)
-              .set(
-                "Content-Range",
-                "bytes */" + totalSize
-              )
-              .end();
-          }
-
-          if (match[2] !== "") {
-            endByte =
-              Number(match[2]);
-
-            if (
-              !Number.isSafeInteger(
-                endByte
-              ) ||
-              endByte < startByte
-            ) {
-              return res
-                .status(416)
-                .set(
-                  "Content-Range",
-                  "bytes */" + totalSize
-                )
-                .end();
-            }
-          }
+        if (
+          !Number.isSafeInteger(
+            startByte
+          ) ||
+          startByte >= totalSize
+        ) {
+          return res
+            .status(416)
+            .set(
+              "Content-Range",
+              "bytes */" + totalSize
+            )
+            .end();
         }
 
-        endByte = Math.min(
-          endByte,
-          totalSize - 1
-        );
+        if (match[2] !== "") {
+          endByte = Number(match[2]);
 
-        partial = true;
+          if (
+            !Number.isSafeInteger(
+              endByte
+            ) ||
+            endByte < startByte
+          ) {
+            return res
+              .status(416)
+              .set(
+                "Content-Range",
+                "bytes */" + totalSize
+              )
+              .end();
+          }
+        }
       }
 
-      const contentLength =
-        endByte - startByte + 1;
-
-      res.status(
-        partial ? 206 : 200
+      endByte = Math.min(
+        endByte,
+        totalSize - 1
       );
 
-      res.set({
-        "Content-Type":
-          media?.mimeType ||
-          "video/mp4",
+      partial = true;
+    }
 
-        "Content-Length":
-          String(contentLength),
+    const contentLength =
+      endByte - startByte + 1;
 
-        "Accept-Ranges": "bytes",
+    res.status(partial ? 206 : 200);
 
-        "Cache-Control":
-          "no-store"
+    res.set({
+      "Content-Type":
+        media?.mimeType || "video/mp4",
+
+      "Content-Length":
+        String(contentLength),
+
+      "Accept-Ranges": "bytes",
+
+      "Cache-Control": "no-store"
+    });
+
+    if (partial) {
+      res.set(
+        "Content-Range",
+        "bytes " +
+          startByte +
+          "-" +
+          endByte +
+          "/" +
+          totalSize
+      );
+    }
+
+    if (media?.fileName) {
+      res.set(
+        "Content-Disposition",
+        "inline; filename*=UTF-8''" +
+          encodeURIComponent(
+            media.fileName
+          )
+      );
+    }
+
+    /*
+     * GramJS expects the download offset
+     * as a big-integer object.
+     *
+     * The previous version passed a normal
+     * JavaScript number, which caused:
+     *
+     * TypeError: offset.divide is not a function
+     */
+    const telegramOffset =
+      bigInt(startByte);
+
+    const iterator =
+      client.iterDownload({
+        file: lastMediaMessage.media,
+
+        offset: telegramOffset,
+
+        limit: contentLength,
+
+        chunkSize: 512 * 1024,
+
+        requestSize: 512 * 1024
       });
 
-      if (partial) {
-        res.set(
-          "Content-Range",
-          "bytes " +
-            startByte +
-            "-" +
-            endByte +
-            "/" +
-            totalSize
-        );
-      }
+    for await (const chunk of iterator) {
+      if (res.destroyed) break;
 
-      if (media?.fileName) {
-        res.set(
-          "Content-Disposition",
-          "inline; filename*=UTF-8''" +
-            encodeURIComponent(
-              media.fileName
+      if (!res.write(chunk)) {
+        await new Promise(
+          (resolve) =>
+            res.once(
+              "drain",
+              resolve
             )
         );
       }
-
-      /*
-       * Stream directly from Telegram.
-       *
-       * We deliberately do not download
-       * the entire movie into Render memory.
-       */
-      const iterator =
-        client.iterDownload({
-          file:
-            lastMediaMessage.media,
-
-          offset: startByte,
-
-          limit: contentLength,
-
-          chunkSize:
-            512 * 1024,
-
-          requestSize:
-            512 * 1024
-        });
-
-      for await (
-        const chunk of iterator
-      ) {
-        if (res.destroyed) {
-          break;
-        }
-
-        if (!res.write(chunk)) {
-          await new Promise(
-            (resolve) =>
-              res.once(
-                "drain",
-                resolve
-              )
-          );
-        }
-      }
-
-      if (!res.destroyed) {
-        res.end();
-      }
-    } catch (error) {
-      console.error(
-        "Telegram media streaming failed:",
-        error
-      );
-
-      if (!res.headersSent) {
-        return res.status(500).json({
-          error: error.message
-        });
-      }
-
-      res.destroy(error);
     }
+
+    if (!res.destroyed) {
+      res.end();
+    }
+  } catch (error) {
+    console.error(
+      "Telegram media streaming failed:",
+      error
+    );
+
+    if (!res.headersSent) {
+      return res.status(500).json({
+        error: error.message
+      });
+    }
+
+    res.destroy(error);
   }
-);
+});
 
 app.listen(PORT, () => {
   console.log(
