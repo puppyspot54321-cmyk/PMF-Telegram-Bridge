@@ -19,12 +19,30 @@ const apiId = Number(process.env.TELEGRAM_API_ID);
 const apiHash = process.env.TELEGRAM_API_HASH;
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
 
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseServiceRoleKey =
+  process.env.SUPABASE_SERVICE_ROLE_KEY;
+
 const client = new TelegramClient(
   new StringSession(""),
   apiId,
   apiHash,
   { connectionRetries: 5 }
 );
+
+function getFileReference(mediaObject) {
+  if (!mediaObject?.fileReference) {
+    return null;
+  }
+
+  try {
+    return Buffer.from(
+      mediaObject.fileReference
+    ).toString("base64");
+  } catch {
+    return null;
+  }
+}
 
 function describeMedia(message) {
   if (!message?.media) return null;
@@ -49,35 +67,155 @@ function describeMedia(message) {
     return {
       type: "document",
       fileName,
-      mimeType: document.mimeType || "application/octet-stream",
-      size: document.size ? String(document.size) : null,
-      documentId: document.id ? String(document.id) : null,
+      mimeType:
+        document.mimeType ||
+        "application/octet-stream",
+
+      size: document.size
+        ? String(document.size)
+        : null,
+
+      documentId: document.id
+        ? String(document.id)
+        : null,
+
       accessHash: document.accessHash
         ? String(document.accessHash)
-        : null
+        : null,
+
+      fileReference:
+        getFileReference(document)
     };
   }
 
   if (message.video) {
     return {
       type: "video",
-      mimeType: message.video.mimeType || "video/mp4",
+
+      mimeType:
+        message.video.mimeType ||
+        "video/mp4",
+
       size: message.video.size
         ? String(message.video.size)
         : null,
+
       videoId: message.video.id
         ? String(message.video.id)
         : null,
+
       accessHash: message.video.accessHash
         ? String(message.video.accessHash)
-        : null
+        : null,
+
+      fileReference:
+        getFileReference(message.video)
     };
   }
 
   return {
     type: "other",
-    mediaClass: message.media.className || null
+    mediaClass:
+      message.media.className || null
   };
+}
+
+async function persistTelegramMedia({
+  chatId,
+  message,
+  media
+}) {
+  if (
+    !supabaseUrl ||
+    !supabaseServiceRoleKey
+  ) {
+    console.warn(
+      "Supabase persistence skipped: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing."
+    );
+
+    return;
+  }
+
+  const payload = {
+    chat_id: String(chatId),
+
+    message_id: Number(message.id),
+
+    document_id:
+      media.documentId ||
+      media.videoId ||
+      null,
+
+    access_hash:
+      media.accessHash || null,
+
+    file_name:
+      media.fileName || null,
+
+    mime_type:
+      media.mimeType || null,
+
+    file_size:
+      media.size
+        ? Number(media.size)
+        : null,
+
+    media_kind:
+      media.type || null,
+
+    file_reference:
+      media.fileReference || null,
+
+    updated_at:
+      new Date().toISOString()
+  };
+
+  const response = await fetch(
+    `${supabaseUrl}/rest/v1/telegram_media_refs`,
+    {
+      method: "POST",
+
+      headers: {
+        apikey:
+          supabaseServiceRoleKey,
+
+        Authorization:
+          `Bearer ${supabaseServiceRoleKey}`,
+
+        "Content-Type":
+          "application/json",
+
+        Prefer:
+          "resolution=merge-duplicates,return=minimal"
+      },
+
+      body: JSON.stringify(payload)
+    }
+  );
+
+  if (!response.ok) {
+    const errorText =
+      await response.text();
+
+    throw new Error(
+      `Supabase media reference save failed (${response.status}): ${errorText}`
+    );
+  }
+
+  console.log(
+    "Telegram media reference persisted to Supabase:"
+  );
+
+  console.log(
+    JSON.stringify({
+      chatId,
+      messageId: message.id,
+      documentId:
+        payload.document_id,
+      fileSize:
+        payload.file_size
+    })
+  );
 }
 
 async function connectTelegram() {
@@ -94,6 +232,7 @@ async function connectTelegram() {
 
     await client.start({
       botAuthToken: botToken,
+
       onError: (error) => {
         console.error(
           "Telegram client error:",
@@ -102,23 +241,28 @@ async function connectTelegram() {
       }
     });
 
-    telegramBot = await client.getMe();
+    telegramBot =
+      await client.getMe();
+
     telegramStatus = "ready";
 
     console.log(
       `Telegram connected as @${
-        telegramBot.username || "unknown"
+        telegramBot.username ||
+        "unknown"
       }`
     );
 
     client.addEventHandler(
       async (event) => {
         try {
-          const message = event.message;
+          const message =
+            event.message;
 
           if (!message) return;
 
-          const chat = await message.getChat();
+          const chat =
+            await message.getChat();
 
           if (!chat) return;
 
@@ -126,14 +270,18 @@ async function connectTelegram() {
             ? String(chat.id)
             : null;
 
-          const title = chat.title || null;
-          const username = chat.username || null;
+          const title =
+            chat.title || null;
+
+          const username =
+            chat.username || null;
 
           lastChat = {
             id: chatId,
             title,
             username,
-            messageId: message.id
+            messageId:
+              message.id
           };
 
           console.log(
@@ -144,20 +292,26 @@ async function connectTelegram() {
             JSON.stringify(lastChat)
           );
 
-          if (chatId !== PMF_MEDIA_CHAT_ID) {
+          if (
+            chatId !==
+            PMF_MEDIA_CHAT_ID
+          ) {
             return;
           }
 
-          const media = describeMedia(message);
+          const media =
+            describeMedia(message);
 
           if (!media) {
             console.log(
               "PMF Media Vault message has no supported media."
             );
+
             return;
           }
 
-          lastMediaMessage = message;
+          lastMediaMessage =
+            message;
 
           console.log(
             "PMF Media Vault media captured:"
@@ -166,10 +320,24 @@ async function connectTelegram() {
           console.log(
             JSON.stringify({
               chatId,
-              messageId: message.id,
+              messageId:
+                message.id,
               media
             })
           );
+
+          try {
+            await persistTelegramMedia({
+              chatId,
+              message,
+              media
+            });
+          } catch (error) {
+            console.error(
+              "Failed to persist Telegram media reference:",
+              error
+            );
+          }
         } catch (error) {
           console.error(
             "Telegram message inspection error:",
@@ -177,11 +345,14 @@ async function connectTelegram() {
           );
         }
       },
+
       new NewMessage({})
     );
   } catch (error) {
     telegramStatus = "error";
-    telegramError = error.message;
+
+    telegramError =
+      error.message;
 
     console.error(
       "Telegram connection failed:",
@@ -192,9 +363,12 @@ async function connectTelegram() {
 
 app.get("/", (_req, res) => {
   res.json({
-    name: "PMF Telegram Bridge",
+    name:
+      "PMF Telegram Bridge",
+
     status: "online",
-    version: "2.1.0"
+
+    version: "2.2.0"
   });
 });
 
@@ -204,71 +378,113 @@ app.get("/health", (_req, res) => {
   });
 });
 
-app.get("/telegram-status", (_req, res) => {
-  res.json({
-    status: telegramStatus,
-    connected: telegramStatus === "ready",
-    bot: telegramBot
-      ? {
-          id: String(telegramBot.id),
-          username:
-            telegramBot.username || null,
-          isBot: telegramBot.bot === true
-        }
-      : null,
-    error: telegramError
-  });
-});
+app.get(
+  "/telegram-status",
+  (_req, res) => {
+    res.json({
+      status:
+        telegramStatus,
 
-app.get("/telegram-last-chat", (_req, res) => {
-  res.json({
-    chat: lastChat
-  });
-});
+      connected:
+        telegramStatus ===
+        "ready",
+
+      bot: telegramBot
+        ? {
+            id:
+              String(
+                telegramBot.id
+              ),
+
+            username:
+              telegramBot.username ||
+              null,
+
+            isBot:
+              telegramBot.bot ===
+              true
+          }
+        : null,
+
+      error:
+        telegramError
+    });
+  }
+);
+
+app.get(
+  "/telegram-last-chat",
+  (_req, res) => {
+    res.json({
+      chat: lastChat
+    });
+  }
+);
 
 app.get(
   "/telegram-latest-media",
   async (_req, res) => {
     try {
-      if (telegramStatus !== "ready") {
-        return res.status(503).json({
-          found: false,
-          error:
-            "Telegram client is not ready",
-          status: telegramStatus
-        });
+      if (
+        telegramStatus !==
+        "ready"
+      ) {
+        return res
+          .status(503)
+          .json({
+            found: false,
+
+            error:
+              "Telegram client is not ready",
+
+            status:
+              telegramStatus
+          });
       }
 
       if (!lastMediaMessage) {
-        return res.status(404).json({
-          found: false,
-          error:
-            "No media has been captured yet. Send a new media message in PMF Media Vault."
-        });
+        return res
+          .status(404)
+          .json({
+            found: false,
+
+            error:
+              "No media has been captured yet. Send a new media message in PMF Media Vault."
+          });
       }
 
       const media =
-        describeMedia(lastMediaMessage);
+        describeMedia(
+          lastMediaMessage
+        );
 
       return res.json({
-        found: Boolean(media),
+        found:
+          Boolean(media),
 
         chat: {
-          id: PMF_MEDIA_CHAT_ID,
-          title: "PMF Media Vault"
+          id:
+            PMF_MEDIA_CHAT_ID,
+
+          title:
+            "PMF Media Vault"
         },
 
         message: {
-          id: lastMediaMessage.id,
+          id:
+            lastMediaMessage.id,
 
-          date: lastMediaMessage.date
-            ? new Date(
-                lastMediaMessage.date * 1000
-              ).toISOString()
-            : null,
+          date:
+            lastMediaMessage.date
+              ? new Date(
+                  lastMediaMessage.date *
+                    1000
+                ).toISOString()
+              : null,
 
           text:
-            lastMediaMessage.message || null
+            lastMediaMessage.message ||
+            null
         },
 
         media
@@ -279,240 +495,292 @@ app.get(
         error
       );
 
-      return res.status(500).json({
-        found: false,
-        error: error.message
-      });
+      return res
+        .status(500)
+        .json({
+          found: false,
+          error:
+            error.message
+        });
     }
   }
 );
 
-app.get("/telegram-media", async (req, res) => {
-  try {
-    if (telegramStatus !== "ready") {
-      return res.status(503).json({
-        error:
-          "Telegram client is not ready",
-        status: telegramStatus
-      });
-    }
+app.get(
+  "/telegram-media",
+  async (req, res) => {
+    try {
+      if (
+        telegramStatus !==
+        "ready"
+      ) {
+        return res
+          .status(503)
+          .json({
+            error:
+              "Telegram client is not ready",
 
-    if (!lastMediaMessage?.media) {
-      return res.status(404).json({
-        error:
-          "No media has been captured yet. Send a new media message in PMF Media Vault."
-      });
-    }
+            status:
+              telegramStatus
+          });
+      }
 
-    const media =
-      describeMedia(lastMediaMessage);
+      if (
+        !lastMediaMessage?.media
+      ) {
+        return res
+          .status(404)
+          .json({
+            error:
+              "No media has been captured yet. Send a new media message in PMF Media Vault."
+          });
+      }
 
-    const totalSize = Number(
-      media?.size || 0
-    );
+      const media =
+        describeMedia(
+          lastMediaMessage
+        );
 
-    if (
-      !Number.isSafeInteger(totalSize) ||
-      totalSize <= 0
-    ) {
-      return res.status(500).json({
-        error:
-          "Captured media does not contain a valid file size."
-      });
-    }
-
-    let startByte = 0;
-    let endByte = totalSize - 1;
-    let partial = false;
-
-    const rangeHeader =
-      req.headers.range;
-
-    if (rangeHeader) {
-      const match =
-        /^bytes=(\d*)-(\d*)$/.exec(
-          rangeHeader.trim()
+      const totalSize =
+        Number(
+          media?.size || 0
         );
 
       if (
-        !match ||
-        (match[1] === "" &&
-          match[2] === "")
+        !Number.isSafeInteger(
+          totalSize
+        ) ||
+        totalSize <= 0
       ) {
         return res
-          .status(416)
-          .set(
-            "Content-Range",
-            "bytes */" + totalSize
-          )
-          .end();
+          .status(500)
+          .json({
+            error:
+              "Captured media does not contain a valid file size."
+          });
       }
 
-      if (match[1] === "") {
-        const suffixLength =
-          Number(match[2]);
+      let startByte = 0;
+      let endByte =
+        totalSize - 1;
+
+      let partial = false;
+
+      const rangeHeader =
+        req.headers.range;
+
+      if (rangeHeader) {
+        const match =
+          /^bytes=(\d*)-(\d*)$/.exec(
+            rangeHeader.trim()
+          );
 
         if (
-          !Number.isSafeInteger(
-            suffixLength
-          ) ||
-          suffixLength <= 0
+          !match ||
+          (match[1] === "" &&
+            match[2] === "")
         ) {
           return res
             .status(416)
             .set(
               "Content-Range",
-              "bytes */" + totalSize
+              "bytes */" +
+                totalSize
             )
             .end();
         }
 
-        startByte = Math.max(
-          totalSize - suffixLength,
-          0
-        );
-      } else {
-        startByte = Number(match[1]);
-
-        if (
-          !Number.isSafeInteger(
-            startByte
-          ) ||
-          startByte >= totalSize
-        ) {
-          return res
-            .status(416)
-            .set(
-              "Content-Range",
-              "bytes */" + totalSize
-            )
-            .end();
-        }
-
-        if (match[2] !== "") {
-          endByte = Number(match[2]);
+        if (match[1] === "") {
+          const suffixLength =
+            Number(match[2]);
 
           if (
             !Number.isSafeInteger(
-              endByte
+              suffixLength
             ) ||
-            endByte < startByte
+            suffixLength <= 0
           ) {
             return res
               .status(416)
               .set(
                 "Content-Range",
-                "bytes */" + totalSize
+                "bytes */" +
+                  totalSize
               )
               .end();
           }
+
+          startByte =
+            Math.max(
+              totalSize -
+                suffixLength,
+              0
+            );
+        } else {
+          startByte =
+            Number(match[1]);
+
+          if (
+            !Number.isSafeInteger(
+              startByte
+            ) ||
+            startByte >=
+              totalSize
+          ) {
+            return res
+              .status(416)
+              .set(
+                "Content-Range",
+                "bytes */" +
+                  totalSize
+              )
+              .end();
+          }
+
+          if (
+            match[2] !== ""
+          ) {
+            endByte =
+              Number(match[2]);
+
+            if (
+              !Number.isSafeInteger(
+                endByte
+              ) ||
+              endByte <
+                startByte
+            ) {
+              return res
+                .status(416)
+                .set(
+                  "Content-Range",
+                  "bytes */" +
+                    totalSize
+                )
+                .end();
+            }
+          }
         }
+
+        endByte =
+          Math.min(
+            endByte,
+            totalSize - 1
+          );
+
+        partial = true;
       }
 
-      endByte = Math.min(
-        endByte,
-        totalSize - 1
+      const contentLength =
+        endByte -
+        startByte +
+        1;
+
+      res.status(
+        partial ? 206 : 200
       );
 
-      partial = true;
-    }
+      res.set({
+        "Content-Type":
+          media?.mimeType ||
+          "video/mp4",
 
-    const contentLength =
-      endByte - startByte + 1;
+        "Content-Length":
+          String(
+            contentLength
+          ),
 
-    res.status(partial ? 206 : 200);
+        "Accept-Ranges":
+          "bytes",
 
-    res.set({
-      "Content-Type":
-        media?.mimeType || "video/mp4",
-
-      "Content-Length":
-        String(contentLength),
-
-      "Accept-Ranges": "bytes",
-
-      "Cache-Control": "no-store"
-    });
-
-    if (partial) {
-      res.set(
-        "Content-Range",
-        "bytes " +
-          startByte +
-          "-" +
-          endByte +
-          "/" +
-          totalSize
-      );
-    }
-
-    if (media?.fileName) {
-      res.set(
-        "Content-Disposition",
-        "inline; filename*=UTF-8''" +
-          encodeURIComponent(
-            media.fileName
-          )
-      );
-    }
-
-    /*
-     * GramJS expects the download offset
-     * as a big-integer object.
-     *
-     * The previous version passed a normal
-     * JavaScript number, which caused:
-     *
-     * TypeError: offset.divide is not a function
-     */
-    const telegramOffset =
-      bigInt(startByte);
-
-    const iterator =
-      client.iterDownload({
-        file: lastMediaMessage.media,
-
-        offset: telegramOffset,
-
-        limit: contentLength,
-
-        chunkSize: 4 * 1024 * 1024,
-        
-        requestSize: 4 * 1024 * 1024
+        "Cache-Control":
+          "no-store"
       });
 
-    for await (const chunk of iterator) {
-      if (res.destroyed) break;
+      if (partial) {
+        res.set(
+          "Content-Range",
+          "bytes " +
+            startByte +
+            "-" +
+            endByte +
+            "/" +
+            totalSize
+        );
+      }
 
-      if (!res.write(chunk)) {
-        await new Promise(
-          (resolve) =>
-            res.once(
-              "drain",
-              resolve
+      if (media?.fileName) {
+        res.set(
+          "Content-Disposition",
+          "inline; filename*=UTF-8''" +
+            encodeURIComponent(
+              media.fileName
             )
         );
       }
-    }
 
-    if (!res.destroyed) {
-      res.end();
-    }
-  } catch (error) {
-    console.error(
-      "Telegram media streaming failed:",
-      error
-    );
+      const telegramOffset =
+        bigInt(startByte);
 
-    if (!res.headersSent) {
-      return res.status(500).json({
-        error: error.message
-      });
-    }
+      const iterator =
+        client.iterDownload({
+          file:
+            lastMediaMessage.media,
 
-    res.destroy(error);
+          offset:
+            telegramOffset,
+
+          limit:
+            contentLength,
+
+          chunkSize:
+            4 * 1024 * 1024,
+
+          requestSize:
+            4 * 1024 * 1024
+        });
+
+      for await (
+        const chunk of iterator
+      ) {
+        if (res.destroyed)
+          break;
+
+        if (
+          !res.write(chunk)
+        ) {
+          await new Promise(
+            (resolve) =>
+              res.once(
+                "drain",
+                resolve
+              )
+          );
+        }
+      }
+
+      if (!res.destroyed) {
+        res.end();
+      }
+    } catch (error) {
+      console.error(
+        "Telegram media streaming failed:",
+        error
+      );
+
+      if (!res.headersSent) {
+        return res
+          .status(500)
+          .json({
+            error:
+              error.message
+          });
+      }
+
+      res.destroy(error);
+    }
   }
-});
+);
 
 app.listen(PORT, () => {
   console.log(
