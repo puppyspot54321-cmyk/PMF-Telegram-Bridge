@@ -101,10 +101,8 @@ function decodeFileReference(value) {
 }
 
 /*
- * IMPORTANT:
- * Movie-specific playback now retrieves the
- * REAL Telegram message instead of constructing
- * a synthetic Telegram media object.
+ * Movie-specific playback retrieves the
+ * REAL Telegram message.
  */
 async function getMappedTelegramMedia(movieId) {
   if (
@@ -170,33 +168,32 @@ async function getMappedTelegramMedia(movieId) {
     );
   }
 
-/*
- * Telegram supergroups/channels use the
- * -100... peer format for entity lookups.
- * Supabase stores the raw channel ID.
- */
-const rawChatId =
-  String(
-    row.chat_id ||
-    PMF_MEDIA_CHAT_ID
-  );
+  /*
+   * Telegram supergroups/channels use the
+   * -100... peer format for entity lookups.
+   */
+  const rawChatId =
+    String(
+      row.chat_id ||
+      PMF_MEDIA_CHAT_ID
+    );
 
-const telegramChatId =
-  rawChatId.startsWith("-100")
-    ? rawChatId
-    : "-100" + rawChatId;
+  const telegramChatId =
+    rawChatId.startsWith("-100")
+      ? rawChatId
+      : "-100" + rawChatId;
 
-const messages =
-  await client.getMessages(
-    telegramChatId,
-    {
-      ids: [
-        Number(
-          row.message_id
-        )
-      ]
-    }
-  );
+  const messages =
+    await client.getMessages(
+      telegramChatId,
+      {
+        ids: [
+          Number(
+            row.message_id
+          )
+        ]
+      }
+    );
 
   const message =
     messages?.[0];
@@ -652,8 +649,8 @@ async function restoreLatestTelegramMedia() {
       "Failed to restore persisted Telegram media:",
       error
     );
+   }
   }
-}
 
 async function fetchTelegramBuffer(
   startByte,
@@ -875,12 +872,20 @@ async function getStreamBuffer(
   }
 
   /*
-   * Keep the main streaming buffer at the
-   * proven stable 8 MB size.
+   * First playback request gets the
+   * smaller startup buffer.
+   *
+   * Subsequent buffers keep the stable
+   * 8 MB streaming size.
    */
+  const bufferSize =
+    startByte === 0
+      ? STARTUP_BUFFER_SIZE
+      : STREAM_BUFFER_SIZE;
+
   const length =
     Math.min(
-      STREAM_BUFFER_SIZE,
+      bufferSize,
       totalSize -
         startByte
     );
@@ -1257,11 +1262,11 @@ app.get(
           error:
             error.message
         });
+      }
     }
-  }
-);
+  );
 
-async function streamTelegramMedia(
+ async function streamTelegramMedia(
   req,
   res
 ) {
@@ -1440,8 +1445,8 @@ async function streamTelegramMedia(
               "Content-Range",
               "bytes */" +
                 totalSize
-            )
-            .end();
+          )
+          .end();
         }
 
         if (
@@ -1744,3 +1749,6 @@ app.listen(
     void connectTelegram();
   }
 );
+
+
+
