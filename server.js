@@ -27,6 +27,12 @@ const STREAM_FETCH_REQUEST_SIZE =
 const DELIVERY_CHUNK_SIZE =
   256 * 1024;
 
+const MOVIE_MEDIA_CACHE_TTL =
+  60 * 1000;
+
+const movieMediaCache =
+  new Map();
+
 let telegramStatus = "starting";
 let telegramError = null;
 let telegramBot = null;
@@ -101,10 +107,32 @@ function decodeFileReference(value) {
 }
 
 /*
- * Movie-specific playback retrieves the
- * REAL Telegram message.
+ * Resolve the REAL Telegram message
+ * mapped to a PMF-Flix movie.
+ *
+ * The resolved message is cached briefly
+ * because browsers normally make several
+ * Range requests while starting playback.
  */
 async function getMappedTelegramMedia(movieId) {
+  const cacheKey =
+    String(movieId);
+
+  const cached =
+    movieMediaCache.get(
+      cacheKey
+    );
+
+  if (
+    cached &&
+    Date.now() -
+      cached.cachedAt <
+      MOVIE_MEDIA_CACHE_TTL &&
+    cached.message?.media
+  ) {
+    return cached.message;
+  }
+
   if (
     !supabaseUrl ||
     !supabaseServiceRoleKey
@@ -169,8 +197,8 @@ async function getMappedTelegramMedia(movieId) {
   }
 
   /*
-   * Telegram supergroups/channels use the
-   * -100... peer format for entity lookups.
+   * Telegram supergroups/channels use
+   * the -100... peer format.
    */
   const rawChatId =
     String(
@@ -207,6 +235,15 @@ async function getMappedTelegramMedia(movieId) {
       "."
     );
   }
+
+  movieMediaCache.set(
+    cacheKey,
+    {
+      message,
+      cachedAt:
+        Date.now()
+    }
+  );
 
   return message;
 }
@@ -649,8 +686,8 @@ async function restoreLatestTelegramMedia() {
       "Failed to restore persisted Telegram media:",
       error
     );
-   }
   }
+}
 
 async function fetchTelegramBuffer(
   startByte,
@@ -678,8 +715,15 @@ async function fetchTelegramBuffer(
       chunkSize:
         STREAM_FETCH_CHUNK_SIZE,
 
+      /*
+       * Never request more from Telegram
+       * than this particular buffer needs.
+       */
       requestSize:
-        STREAM_FETCH_REQUEST_SIZE
+        Math.min(
+          STREAM_FETCH_REQUEST_SIZE,
+          length
+        )
     });
 
   const parts = [];
@@ -710,8 +754,8 @@ async function prepareNextBuffer(
 ) {
   if (
     startByte >= totalSize ||
-    lastMediaMessage !==
-      mediaMessage
+    lastMediaMessage?.id !==
+      mediaMessage?.id
   ) {
     return null;
   }
@@ -754,8 +798,8 @@ async function prepareNextBuffer(
         );
 
       if (
-        lastMediaMessage !==
-        mediaMessage
+        lastMediaMessage?.id !==
+        mediaMessage?.id
       ) {
         return null;
       }
@@ -803,8 +847,8 @@ function startNextBufferPrefetch(
 
   if (
     nextStart >= totalSize ||
-    lastMediaMessage !==
-      mediaMessage ||
+    lastMediaMessage?.id !==
+      mediaMessage?.id ||
     nextStreamBuffer ||
     nextStreamBufferPromise
   ) {
@@ -872,11 +916,11 @@ async function getStreamBuffer(
   }
 
   /*
-   * First playback request gets the
-   * smaller startup buffer.
+   * The very first request receives
+   * 2 MB so playback can begin sooner.
    *
-   * Subsequent buffers keep the stable
-   * 8 MB streaming size.
+   * Later buffers use the proven
+   * stable 8 MB size.
    */
   const bufferSize =
     startByte === 0
@@ -900,8 +944,8 @@ async function getStreamBuffer(
         );
 
       if (
-        lastMediaMessage !==
-        mediaMessage
+        lastMediaMessage?.id !==
+        mediaMessage?.id
       ) {
         return null;
       }
@@ -1050,6 +1094,8 @@ async function connectTelegram() {
 
           lastMediaMessage =
             message;
+
+          movieMediaCache.clear();
 
           clearStreamBuffer();
 
@@ -1262,11 +1308,11 @@ app.get(
           error:
             error.message
         });
-      }
     }
-  );
+  }
+);
 
- async function streamTelegramMedia(
+async function streamTelegramMedia(
   req,
   res
 ) {
@@ -1291,7 +1337,12 @@ app.get(
 
     /*
      * Movie-specific route:
+     *
      * /telegram-media/:movieId
+     *
+     * The mapped Telegram message is
+     * cached, so browser Range requests
+     * do not repeatedly hit Telegram.
      */
     if (req.params.movieId) {
       try {
@@ -1324,10 +1375,22 @@ app.get(
           });
       }
 
-      lastMediaMessage =
-        mediaMessage;
+      /*
+       * Only reset the shared stream when
+       * the actual Telegram message changes.
+       *
+       * Multiple Range requests for the
+       * same movie must NOT wipe the buffer.
+       */
+      if (
+        lastMediaMessage?.id !==
+        mediaMessage.id
+      ) {
+        lastMediaMessage =
+          mediaMessage;
 
-      clearStreamBuffer();
+        clearStreamBuffer();
+      }
     }
 
     if (!mediaMessage?.media) {
@@ -1445,8 +1508,8 @@ app.get(
               "Content-Range",
               "bytes */" +
                 totalSize
-          )
-          .end();
+            )
+            .end();
         }
 
         if (
@@ -1749,6 +1812,4 @@ app.listen(
     void connectTelegram();
   }
 );
-
-
-
+     
