@@ -5,6 +5,32 @@ import { StringSession } from "telegram/sessions/index.js";
 import bigInt from "big-integer";
 
 const app = express();
+
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET,HEAD,OPTIONS"
+  );
+
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Range,Content-Type"
+  );
+
+  res.setHeader(
+    "Access-Control-Expose-Headers",
+    "Accept-Ranges,Content-Length,Content-Range,Content-Type,Content-Disposition"
+  );
+
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+
+  next();
+});
+
 const PORT = process.env.PORT || 3000;
 
 const PMF_MEDIA_CHAT_ID = "4490224317";
