@@ -1063,15 +1063,26 @@ async function connectTelegram() {
             return;
           }
 
-          const chatId =
+                    const rawChatId =
             chat.id
               ? String(chat.id)
               : null;
 
+          /*
+           * GramJS represents supergroup/channel
+           * peers as -100<chatId>, while PMF's
+           * stored chat ID uses the positive form.
+           * Normalize both forms before matching.
+           */
+          const chatId =
+            rawChatId?.startsWith("-100")
+              ? rawChatId.slice(4)
+              : rawChatId;
+
           const title =
             chat.title ||
             null;
-
+          
           const username =
             chat.username ||
             null;
@@ -1092,10 +1103,11 @@ async function connectTelegram() {
             "Telegram message received:"
           );
 
-          console.log(
-            JSON.stringify(
-              lastChat
-            )
+                    console.log(
+            JSON.stringify({
+              ...lastChat,
+              rawChatId
+            })
           );
 
           if (
