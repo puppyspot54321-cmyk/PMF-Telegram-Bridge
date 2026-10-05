@@ -1369,15 +1369,14 @@ app.get(
       );
 
       return res
-        .status(500)
-        .json({
-          found:
-            false,
+  .status(500)
+  .json({
+    found: false,
 
-          error:
-            error.message
-        });
-    }
+    error:
+      error.message
+  });
+}
   }
 );
 
@@ -1404,15 +1403,6 @@ async function streamTelegramMedia(
     let mediaMessage =
       lastMediaMessage;
 
-    /*
-     * Movie-specific route:
-     *
-     * /telegram-media/:movieId
-     *
-     * The mapped Telegram message is
-     * cached, so browser Range requests
-     * do not repeatedly hit Telegram.
-     */
     if (req.params.movieId) {
       try {
         mediaMessage =
@@ -1443,23 +1433,6 @@ async function streamTelegramMedia(
               "."
           });
       }
-
-      /*
-       * Only reset the shared stream when
-       * the actual Telegram message changes.
-       *
-       * Multiple Range requests for the
-       * same movie must NOT wipe the buffer.
-       */
-      if (
-        lastMediaMessage?.id !==
-        mediaMessage.id
-      ) {
-        lastMediaMessage =
-          mediaMessage;
-
-        clearStreamBuffer();
-      }
     }
 
     if (!mediaMessage?.media) {
@@ -1467,7 +1440,7 @@ async function streamTelegramMedia(
         .status(404)
         .json({
           error:
-            "No media has been captured or restored yet."
+            "No Telegram media has been found."
         });
     }
 
@@ -1491,7 +1464,7 @@ async function streamTelegramMedia(
         .status(500)
         .json({
           error:
-            "Captured media does not contain a valid file size."
+            "Telegram media does not contain a valid file size."
         });
     }
 
@@ -1522,8 +1495,7 @@ async function streamTelegramMedia(
           .status(416)
           .set(
             "Content-Range",
-            "bytes */" +
-              totalSize
+            `bytes */${totalSize}`
           )
           .end();
       }
@@ -1546,8 +1518,7 @@ async function streamTelegramMedia(
             .status(416)
             .set(
               "Content-Range",
-              "bytes */" +
-                totalSize
+              `bytes */${totalSize}`
             )
             .end();
         }
@@ -1575,8 +1546,7 @@ async function streamTelegramMedia(
             .status(416)
             .set(
               "Content-Range",
-              "bytes */" +
-                totalSize
+              `bytes */${totalSize}`
             )
             .end();
         }
@@ -1600,8 +1570,7 @@ async function streamTelegramMedia(
               .status(416)
               .set(
                 "Content-Range",
-                "bytes */" +
-                  totalSize
+                `bytes */${totalSize}`
               )
               .end();
           }
@@ -1645,18 +1614,13 @@ async function streamTelegramMedia(
         "no-store",
 
       "X-PMF-Stream":
-        "2.6.0"
+        "3.0.0"
     });
 
     if (partial) {
       res.set(
         "Content-Range",
-        "bytes " +
-          startByte +
-          "-" +
-          endByte +
-          "/" +
-          totalSize
+        `bytes ${startByte}-${endByte}/${totalSize}`
       );
     }
 
@@ -1672,84 +1636,54 @@ async function streamTelegramMedia(
 
     res.flushHeaders?.();
 
-    let bufferState =
-      await getStreamBuffer(
-        startByte,
-        totalSize,
-        mediaMessage
-      );
-
-    if (
-      !bufferState ||
-      !bufferState.buffer.length
-    ) {
-      throw new Error(
-        "Unable to prepare Telegram stream buffer."
-      );
-    }
+    const TELEGRAM_CHUNK_SIZE =
+      512 * 1024;
 
     let currentByte =
       startByte;
 
-    const streamEnd =
-      endByte;
-
     while (
       currentByte <=
-        streamEnd &&
+        endByte &&
       !res.destroyed
     ) {
-      if (
-        !bufferState ||
-        bufferState.messageId !==
-          mediaMessage.id ||
-        currentByte <
-          bufferState.start ||
-        currentByte >
-          bufferState.end
-      ) {
-        bufferState =
-          await getStreamBuffer(
-            currentByte,
-            totalSize,
-            mediaMessage
-          );
-
-        if (
-          !bufferState ||
-          !bufferState.buffer.length
-        ) {
-          throw new Error(
-            "Unable to refill Telegram stream buffer."
-          );
-        }
-      }
-
-      const offsetInBuffer =
-        currentByte -
-        bufferState.start;
-
-      const available =
-        bufferState.buffer.length -
-        offsetInBuffer;
-
       const remaining =
-        streamEnd -
+        endByte -
         currentByte +
         1;
 
+      const requestedLength =
+        Math.min(
+          TELEGRAM_CHUNK_SIZE,
+          remaining
+        );
+
+      const buffer =
+        await fetchTelegramBuffer(
+          currentByte,
+          requestedLength,
+          mediaMessage
+        );
+
+      if (
+        !buffer ||
+        buffer.length === 0
+      ) {
+        throw new Error(
+          `Telegram returned no data at byte ${currentByte}.`
+        );
+      }
+
       const bytesToWrite =
         Math.min(
-          DELIVERY_CHUNK_SIZE,
-          available,
+          buffer.length,
           remaining
         );
 
       const slice =
-        bufferState.buffer.subarray(
-          offsetInBuffer,
-          offsetInBuffer +
-            bytesToWrite
+        buffer.subarray(
+          0,
+          bytesToWrite
         );
 
       if (
@@ -1767,66 +1701,12 @@ async function streamTelegramMedia(
       currentByte +=
         bytesToWrite;
 
-      const remainingInBuffer =
-        bufferState.end -
-        currentByte +
-        1;
-
       if (
-        remainingInBuffer <=
-        STREAM_PREFETCH_TRIGGER
+        bytesToWrite <= 0
       ) {
-        startNextBufferPrefetch(
-          bufferState.end,
-          totalSize,
-          mediaMessage
+        throw new Error(
+          "Telegram stream did not advance."
         );
-      }
-
-      if (
-        currentByte >
-          bufferState.end &&
-        currentByte <=
-          streamEnd
-      ) {
-        if (
-          nextStreamBuffer &&
-          nextStreamBuffer.messageId ===
-            mediaMessage.id &&
-          nextStreamBuffer.start ===
-            currentByte
-        ) {
-          currentStreamBuffer =
-            nextStreamBuffer;
-
-          nextStreamBuffer =
-            null;
-
-          bufferState =
-            currentStreamBuffer;
-
-          startNextBufferPrefetch(
-            bufferState.end,
-            totalSize,
-            mediaMessage
-          );
-        } else {
-          bufferState =
-            await getStreamBuffer(
-              currentByte,
-              totalSize,
-              mediaMessage
-            );
-
-          if (
-            !bufferState ||
-            !bufferState.buffer.length
-          ) {
-            throw new Error(
-              "Unable to refill Telegram stream buffer."
-            );
-          }
-        }
       }
 
       await new Promise(
@@ -1882,3 +1762,9 @@ app.listen(
   }
 );
      
+
+
+
+
+
+
