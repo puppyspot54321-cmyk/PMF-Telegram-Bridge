@@ -727,32 +727,66 @@ async function fetchTelegramBuffer(
     return Buffer.alloc(0);
   }
 
+  /*
+   * IMPORTANT:
+   *
+   * Browsers can request any byte position,
+   * but Telegram file downloads must use
+   * properly aligned offsets.
+   *
+   * We therefore download from the previous
+   * 4096-byte boundary and remove the extra
+   * leading bytes before returning the exact
+   * browser-requested data.
+   */
+
+  const TELEGRAM_ALIGNMENT = 4096;
+
+  const alignedStart =
+    Math.floor(
+      startByte /
+        TELEGRAM_ALIGNMENT
+    ) *
+    TELEGRAM_ALIGNMENT;
+
+  const prefixBytes =
+    startByte -
+    alignedStart;
+
+  const telegramLength =
+    length +
+    prefixBytes;
+
   const iterator =
     client.iterDownload({
       file:
         mediaMessage.media,
 
       offset:
-        bigInt(startByte),
+        bigInt(alignedStart),
 
       limit:
-        length,
+        telegramLength,
 
       chunkSize:
         STREAM_FETCH_CHUNK_SIZE,
 
-      /*
-       * Never request more from Telegram
-       * than this particular buffer needs.
-       */
       requestSize:
         Math.min(
           STREAM_FETCH_REQUEST_SIZE,
-          length
+          Math.max(
+            TELEGRAM_ALIGNMENT,
+            Math.floor(
+              telegramLength /
+                TELEGRAM_ALIGNMENT
+            ) *
+              TELEGRAM_ALIGNMENT
+          )
         )
     });
 
   const parts = [];
+
   let total = 0;
 
   for await (
@@ -767,9 +801,19 @@ async function fetchTelegramBuffer(
       buffer.length;
   }
 
-  return Buffer.concat(
-    parts,
-    total
+  const downloaded =
+    Buffer.concat(
+      parts,
+      total
+    );
+
+  /*
+   * Return ONLY the exact bytes
+   * requested by the browser.
+   */
+  return downloaded.subarray(
+    prefixBytes,
+    prefixBytes + length
   );
 }
 
