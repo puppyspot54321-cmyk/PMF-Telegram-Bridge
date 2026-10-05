@@ -728,34 +728,29 @@ async function fetchTelegramBuffer(
   }
 
   /*
-   * IMPORTANT:
+   * GramJS iterDownload has two important rules:
    *
-   * Browsers can request any byte position,
-   * but Telegram file downloads must use
-   * properly aligned offsets.
+   * 1. requestSize is capped at 512 KB.
+   * 2. limit is the NUMBER OF CHUNKS, not a byte count.
    *
-   * We therefore download from the previous
-   * 4096-byte boundary and remove the extra
-   * leading bytes before returning the exact
-   * browser-requested data.
+   * The previous bridge passed a byte count as
+   * limit. That could make GramJS keep requesting
+   * data far beyond the browser's requested Range,
+   * which is why the HTTP request could sit loading.
+   *
+   * Use GramJS's supported 512 KB request size and
+   * let GramJS's GenericDownloadIter normalize an
+   * arbitrary browser Range offset internally.
    */
 
-  const TELEGRAM_ALIGNMENT = 4096;
+  const TELEGRAM_CHUNK_SIZE =
+    512 * 1024;
 
-  const alignedStart =
-    Math.floor(
-      startByte /
-        TELEGRAM_ALIGNMENT
-    ) *
-    TELEGRAM_ALIGNMENT;
-
-  const prefixBytes =
-    startByte -
-    alignedStart;
-
-  const telegramLength =
-    length +
-    prefixBytes;
+  const chunkCount =
+    Math.ceil(
+      length /
+        TELEGRAM_CHUNK_SIZE
+    );
 
   const iterator =
     client.iterDownload({
@@ -763,26 +758,16 @@ async function fetchTelegramBuffer(
         mediaMessage.media,
 
       offset:
-        bigInt(alignedStart),
+        bigInt(startByte),
 
       limit:
-        telegramLength,
+        chunkCount,
 
       chunkSize:
-        STREAM_FETCH_CHUNK_SIZE,
+        TELEGRAM_CHUNK_SIZE,
 
       requestSize:
-        Math.min(
-          STREAM_FETCH_REQUEST_SIZE,
-          Math.max(
-            TELEGRAM_ALIGNMENT,
-            Math.floor(
-              telegramLength /
-                TELEGRAM_ALIGNMENT
-            ) *
-              TELEGRAM_ALIGNMENT
-          )
-        )
+        TELEGRAM_CHUNK_SIZE
     });
 
   const parts = [];
@@ -799,6 +784,12 @@ async function fetchTelegramBuffer(
 
     total +=
       buffer.length;
+
+    if (
+      total >= length
+    ) {
+      break;
+    }
   }
 
   const downloaded =
@@ -807,17 +798,13 @@ async function fetchTelegramBuffer(
       total
     );
 
-  /*
-   * Return ONLY the exact bytes
-   * requested by the browser.
-   */
   return downloaded.subarray(
-    prefixBytes,
-    prefixBytes + length
+    0,
+    length
   );
 }
 
-async function prepareNextBuffer(
+  async function prepareNextBuffer(
   startByte,
   totalSize,
   mediaMessage
