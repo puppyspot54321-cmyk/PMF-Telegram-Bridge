@@ -1258,7 +1258,7 @@ async function connectTelegram() {
 
           try {
             const caption = String(message.message || message.text || "");
-            const movieIdMatch = caption.match(/\\bPMF_MOVIE_ID\\s*[:=]\\s*(\\d+)\\b/i);
+            const movieIdMatch = caption.match(/\bPMF_MOVIE_ID\s*[:=]\s*(\d+)\b/i);
             let mappedMovieId = null;
 
             if (movieIdMatch) {
