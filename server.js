@@ -391,10 +391,55 @@ function describeMedia(message) {
   };
 }
 
+async function findPendingMovieUploadIntent(movieId) {
+  if (!supabaseUrl || !supabaseServiceRoleKey) return false;
+
+  const response = await fetch(
+    `${supabaseUrl}/rest/v1/telegram_upload_intents?movie_id=eq.${encodeURIComponent(movieId)}&status=eq.pending&select=movie_id&limit=1`,
+    {
+      headers: {
+        apikey: supabaseServiceRoleKey,
+        Authorization: `Bearer ${supabaseServiceRoleKey}`
+      }
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`Telegram upload intent lookup failed (${response.status}): ${await response.text()}`);
+  }
+
+  const rows = await response.json();
+  return Array.isArray(rows) && rows.length > 0;
+}
+
+async function markMovieUploadIntentFulfilled(movieId) {
+  const response = await fetch(
+    `${supabaseUrl}/rest/v1/telegram_upload_intents?movie_id=eq.${encodeURIComponent(movieId)}&status=eq.pending`,
+    {
+      method: "PATCH",
+      headers: {
+        apikey: supabaseServiceRoleKey,
+        Authorization: `Bearer ${supabaseServiceRoleKey}`,
+        "Content-Type": "application/json",
+        Prefer: "return=minimal"
+      },
+      body: JSON.stringify({
+        status: "fulfilled",
+        fulfilled_at: new Date().toISOString()
+      })
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`Telegram upload intent update failed (${response.status}): ${await response.text()}`);
+  }
+}
+
 async function persistTelegramMedia({
   chatId,
   message,
-  media
+  media,
+  movieId = null
 }) {
   if (
     !supabaseUrl ||
@@ -410,6 +455,8 @@ async function persistTelegramMedia({
   const payload = {
     chat_id:
       String(chatId),
+
+    ...(movieId ? { movie_id: Number(movieId) } : {}),
 
     message_id:
       Number(message.id),
@@ -450,41 +497,89 @@ async function persistTelegramMedia({
       new Date().toISOString()
   };
 
-  const response =
-    await fetch(
-      `${supabaseUrl}/rest/v1/telegram_media_refs`,
+  let response;
+
+  if (movieId) {
+    const existingResponse = await fetch(
+      `${supabaseUrl}/rest/v1/telegram_media_refs?movie_id=eq.${encodeURIComponent(movieId)}&select=id&limit=1`,
       {
-        method:
-          "POST",
-
         headers: {
-          apikey:
-            supabaseServiceRoleKey,
-
-          Authorization:
-            `Bearer ${supabaseServiceRoleKey}`,
-
-          "Content-Type":
-            "application/json",
-
-          Prefer:
-            "resolution=merge-duplicates,return=minimal"
-        },
-
-        body:
-          JSON.stringify(
-            payload
-          )
+          apikey: supabaseServiceRoleKey,
+          Authorization: `Bearer ${supabaseServiceRoleKey}`
+        }
       }
     );
 
-  if (!response.ok) {
-    const errorText =
-      await response.text();
+    if (!existingResponse.ok) {
+      throw new Error(`Existing movie media lookup failed (${existingResponse.status}): ${await existingResponse.text()}`);
+    }
 
+    const existingRows = await existingResponse.json();
+    const hasExistingMapping = Array.isArray(existingRows) && existingRows.length > 0;
+
+    response = await fetch(
+      hasExistingMapping
+        ? `${supabaseUrl}/rest/v1/telegram_media_refs?movie_id=eq.${encodeURIComponent(movieId)}`
+        : `${supabaseUrl}/rest/v1/telegram_media_refs`,
+      {
+        method: hasExistingMapping ? "PATCH" : "POST",
+        headers: {
+          apikey: supabaseServiceRoleKey,
+          Authorization: `Bearer ${supabaseServiceRoleKey}`,
+          "Content-Type": "application/json",
+          Prefer: "resolution=merge-duplicates,return=minimal"
+        },
+        body: JSON.stringify(payload)
+      }
+    );
+  } else {
+    response = await fetch(
+      `${supabaseUrl}/rest/v1/telegram_media_refs`,
+      {
+        method: "POST",
+        headers: {
+          apikey: supabaseServiceRoleKey,
+          Authorization: `Bearer ${supabaseServiceRoleKey}`,
+          "Content-Type": "application/json",
+          Prefer: "resolution=merge-duplicates,return=minimal"
+        },
+        body: JSON.stringify(payload)
+      }
+    );
+  }
+
+  if (!response.ok) {
+    const errorText = await response.text();
     throw new Error(
       `Supabase media reference save failed (${response.status}): ${errorText}`
     );
+  }
+
+  if (movieId) {
+    const movieUpdate = await fetch(
+      `${supabaseUrl}/rest/v1/movies?id=eq.${encodeURIComponent(movieId)}`,
+      {
+        method: "PATCH",
+        headers: {
+          apikey: supabaseServiceRoleKey,
+          Authorization: `Bearer ${supabaseServiceRoleKey}`,
+          "Content-Type": "application/json",
+          Prefer: "return=minimal"
+        },
+        body: JSON.stringify({
+          telegram_message_id: Number(message.id),
+          video_url: `https://pmf-telegram-bridge.onrender.com/telegram-media/${movieId}`,
+          video_type: "mp4"
+        })
+      }
+    );
+
+    if (!movieUpdate.ok) {
+      throw new Error(`PMF movie Telegram link update failed (${movieUpdate.status}): ${await movieUpdate.text()}`);
+    }
+
+    await markMovieUploadIntentFulfilled(movieId);
+    movieMediaCache.delete(String(movieId));
   }
 
   console.log(
@@ -1184,13 +1279,36 @@ async function connectTelegram() {
           );
 
           try {
+            const caption = String(message.message || message.text || "");
+            const movieIdMatch = caption.match(/\bPMF_MOVIE_ID\s*[:=]\s*(\d+)\b/i);
+            let mappedMovieId = null;
+
+            if (movieIdMatch) {
+              const candidateMovieId = Number(movieIdMatch[1]);
+              if (Number.isSafeInteger(candidateMovieId) && candidateMovieId > 0) {
+                const hasPendingIntent = await findPendingMovieUploadIntent(candidateMovieId);
+                if (hasPendingIntent) {
+                  mappedMovieId = candidateMovieId;
+                } else {
+                  console.warn(
+                    `Telegram upload ${message.id} included PMF_MOVIE_ID ${candidateMovieId}, but no pending upload intent exists. Saving it as an unmapped media reference.`
+                  );
+                }
+              }
+            }
+
             await persistTelegramMedia({
               chatId,
-
               message,
-
-              media
+              media,
+              movieId: mappedMovieId
             });
+
+            if (mappedMovieId) {
+              console.log(
+                `Telegram media message ${message.id} successfully mapped to PMF-Flix movie ${mappedMovieId}.`
+              );
+            }
           } catch (error) {
             console.error(
               "Failed to persist Telegram media reference:",
