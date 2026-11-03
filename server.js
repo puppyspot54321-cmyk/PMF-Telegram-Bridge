@@ -567,7 +567,9 @@ async function persistTelegramMedia({
           Prefer: "return=minimal"
         },
         body: JSON.stringify({
-          telegram_message_id: Number(message.id)
+          telegram_message_id: Number(message.id),
+          video_url: `https://pmf-telegram-bridge.onrender.com/telegram-media/${movieId}`,
+          video_type: "mp4"
         })
       }
     );
