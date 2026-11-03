@@ -556,6 +556,26 @@ async function persistTelegramMedia({
   }
 
   if (movieId) {
+    const movieUpdate = await fetch(
+      `${supabaseUrl}/rest/v1/movies?id=eq.${encodeURIComponent(movieId)}`,
+      {
+        method: "PATCH",
+        headers: {
+          apikey: supabaseServiceRoleKey,
+          Authorization: `Bearer ${supabaseServiceRoleKey}`,
+          "Content-Type": "application/json",
+          Prefer: "return=minimal"
+        },
+        body: JSON.stringify({
+          telegram_message_id: Number(message.id)
+        })
+      }
+    );
+
+    if (!movieUpdate.ok) {
+      throw new Error(`PMF movie Telegram link update failed (${movieUpdate.status}): ${await movieUpdate.text()}`);
+    }
+
     await markMovieUploadIntentFulfilled(movieId);
     movieMediaCache.delete(String(movieId));
   }
